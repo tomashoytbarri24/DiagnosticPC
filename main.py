@@ -121,10 +121,10 @@ class App(ctk.CTk):
         self.card_cpu.pack(side="left", expand=True, fill="both", padx=(0, 8))
         self.lbl_cpu, self.bar_cpu, self.lbl_cpu_temp = self.build_card_content(self.card_cpu, COLOR_CPU)
 
-        # RAM Card
+        # RAM Card (Muestra consumo en GB)
         self.card_ram = self.create_metric_card(self.frame_meters, "MEMORIA RAM", COLOR_RAM)
         self.card_ram.pack(side="left", expand=True, fill="both", padx=4)
-        self.lbl_ram, self.bar_ram, _ = self.build_card_content(self.card_ram, COLOR_RAM, hide_temp=True)
+        self.lbl_ram, self.bar_ram, self.lbl_ram_gb = self.build_card_content(self.card_ram, COLOR_RAM, hide_sublabel=False)
 
         # GPU Card
         self.card_gpu = self.create_metric_card(self.frame_meters, "GRÁFICA (GPU)", COLOR_GPU)
@@ -182,7 +182,7 @@ class App(ctk.CTk):
         )
         self.frame_charts.pack(fill="both", expand=True)
 
-        # FIGURA MATPLOTLIB ESTILIZADA
+        # FIGURA MATPLOTLIB
         self.fig = Figure(figsize=(8, 2.5), dpi=90, facecolor=BG_CARD)
 
         self.ax_cpu = self.fig.add_subplot(131, facecolor=BG_CARD)
@@ -220,7 +220,7 @@ class App(ctk.CTk):
         lbl_title.pack(anchor="w", padx=12, pady=(10, 2))
         return card
 
-    def build_card_content(self, card, color, hide_temp=False):
+    def build_card_content(self, card, color, hide_sublabel=False):
         lbl_val = ctk.CTkLabel(card, text="0%", font=("Segoe UI", 18, "bold"), text_color="#f8fafc")
         lbl_val.pack(anchor="w", padx=12, pady=(0, 4))
 
@@ -228,12 +228,12 @@ class App(ctk.CTk):
         bar.set(0)
         bar.pack(fill="x", padx=12, pady=(0, 8))
 
-        lbl_temp = None
-        if not hide_temp:
-            lbl_temp = ctk.CTkLabel(card, text="-- °C", font=("Segoe UI", 11, "bold"), text_color=color)
-            lbl_temp.pack(anchor="w", padx=12, pady=(0, 8))
+        lbl_sub = None
+        if not hide_sublabel:
+            lbl_sub = ctk.CTkLabel(card, text="--", font=("Segoe UI", 11, "bold"), text_color=color)
+            lbl_sub.pack(anchor="w", padx=12, pady=(0, 8))
 
-        return lbl_val, bar, lbl_temp
+        return lbl_val, bar, lbl_sub
 
     def format_axes(self, ax, title):
         ax.set_title(title, color="#e2e8f0", fontsize=9, fontweight="bold", pad=8)
@@ -299,6 +299,7 @@ class App(ctk.CTk):
 
             self.lbl_ram.configure(text=f"{t['ram_usage']}%")
             self.bar_ram.set(t["ram_usage"] / 100.0)
+            self.lbl_ram_gb.configure(text=f"{t['ram_used_gb']} GB / {t['ram_total_gb']} GB")
 
             self.lbl_gpu.configure(text=f"{t['gpu_usage']}%")
             self.bar_gpu.set(t["gpu_usage"] / 100.0)
