@@ -12,7 +12,7 @@ class GameOverlay(ctk.CTkToplevel):
         self.overrideredirect(True)
         self.attributes("-topmost", True)
 
-        # Transparencia total del fondo (remueve los bordes negros exteriores)
+        # Transparencia total del fondo (remueve bordes negros exteriores)
         self.attributes("-transparentcolor", "black")
         self.configure(fg_color="black")
 
@@ -52,10 +52,10 @@ class GameOverlay(ctk.CTkToplevel):
         self.lbl_telemetry.bind("<ButtonPress-1>", self.start_move)
         self.lbl_telemetry.bind("<B1-Motion>", self.do_move)
 
-        # 4. Forzar permanencia al frente sobre juegos mediante Win32 API
+        # 4. Forzar permanencia al frente con Win32 API
         self.after(200, self.force_topmost_windows_native)
 
-        # 5. Hilo en segundo plano para la telemetría (Cero Latencia / Cero Lag)
+        # 5. Hilo en segundo plano para telemetría (Cero Latencia / Cero Lag)
         self.thread = threading.Thread(target=self._async_telemetry_reader, daemon=True)
         self.thread.start()
 
@@ -74,7 +74,7 @@ class GameOverlay(ctk.CTkToplevel):
         self.geometry(f"+{x}+{y}")
 
     def force_topmost_windows_native(self):
-        """Ajusta estilos extended de Windows (WS_EX_TOPMOST) para mantener visibilidad sobre juegos."""
+        """Aplica atributos avanzados a nivel de Win32 API para maximizar la visibilidad sobre juegos."""
         try:
             hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
             if hwnd == 0:
@@ -82,20 +82,24 @@ class GameOverlay(ctk.CTkToplevel):
 
             GWL_EXSTYLE = -20
             WS_EX_TOPMOST = 0x00000008
+            WS_EX_TOOLWINDOW = 0x00000080  # Evita que se oculte al minimizar y fuerza prioridad
+            
             SWP_NOMOVE = 0x0002
             SWP_NOSIZE = 0x0001
             SWP_SHOWWINDOW = 0x0040
             HWND_TOPMOST = -1
 
+            # Aplicar los estilos extendidos de la API de Windows
             current_style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, current_style | WS_EX_TOPMOST)
+            ctypes.windll.user32.SetWindowLongW(hwnd, GWL_EXSTYLE, current_style | WS_EX_TOPMOST | WS_EX_TOOLWINDOW)
 
+            # Posicionar por encima de todas las capas de ventanas
             ctypes.windll.user32.SetWindowPos(
                 hwnd, HWND_TOPMOST, 0, 0, 0, 0, 
                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
             )
         except Exception as e:
-            print(f"Error fijando Z-Order de Windows: {e}")
+            print(f"Error fijando Z-Order avanzado de Windows: {e}")
 
     def _async_telemetry_reader(self):
         """Hilo secundario para no congelar la GUI durante la lectura de sensores."""
