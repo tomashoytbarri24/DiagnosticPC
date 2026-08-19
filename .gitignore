@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pkl
+
+# Entornos virtuales
+venv/
+env/
+
+# Base de datos local (para que cada quien genere su propia DB de prueba)
+*.db
+*.sqlite3
+
+# VS Code / IDEs
+.vscode/
+.idea/
