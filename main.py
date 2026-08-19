@@ -12,6 +12,7 @@ from matplotlib.figure import Figure
 
 from core.telemetry import get_system_telemetry, get_all_disks_data, calculate_preliminary_score
 from database.db import init_db, save_telemetry_record
+from gui.overlay import GameOverlay
 
 # Configuración Visual Global
 ctk.set_appearance_mode("Dark")
@@ -32,11 +33,14 @@ class App(ctk.CTk):
         super().__init__()
 
         self.title("DiagnosticPC - Predictive Analytics Dashboard")
-        self.geometry("1100x720")
+        self.geometry("1100x750")
         self.resizable(False, False)
         self.configure(fg_color=BG_MAIN)
 
         init_db()
+
+        # Instancia para la ventana del Overlay
+        self.overlay_window = None
 
         # Buffer para las últimas 25 lecturas
         self.max_points = 25
@@ -70,7 +74,7 @@ class App(ctk.CTk):
             font=("Segoe UI", 11),
             text_color=COLOR_TEXT_DIM
         )
-        self.lbl_subtitle.pack(anchor="w", padx=20, pady=(0, 25))
+        self.lbl_subtitle.pack(anchor="w", padx=20, pady=(0, 20))
 
         # Tarjeta de Salud Global en Sidebar
         self.card_health_sidebar = ctk.CTkFrame(
@@ -105,6 +109,20 @@ class App(ctk.CTk):
             text_color="#f8fafc"
         )
         self.lbl_health_status.pack(anchor="w", padx=15, pady=(0, 12))
+
+        # Botón para Activar / Desactivar Overlay In-Game
+        self.btn_overlay = ctk.CTkButton(
+            self.sidebar,
+            text="🎮 Activar Overlay In-Game",
+            fg_color="#10b981",
+            hover_color="#059669",
+            text_color="#ffffff",
+            font=("Segoe UI", 12, "bold"),
+            height=38,
+            corner_radius=10,
+            command=self.toggle_overlay
+        )
+        self.btn_overlay.pack(fill="x", padx=15, pady=(15, 0))
 
         # ----------------------------------------------------
         # 2. CONTENIDO PRINCIPAL
@@ -190,6 +208,24 @@ class App(ctk.CTk):
 
         self.update_charts_fast()
 
+    def toggle_overlay(self):
+        """ Controla la apertura y cierre del Overlay In-Game """
+        if self.overlay_window is None or not self.overlay_window.winfo_exists():
+            self.overlay_window = GameOverlay(master=self)
+            self.btn_overlay.configure(
+                text="❌ Cerrar Overlay In-Game", 
+                fg_color="#ef4444", 
+                hover_color="#dc2626"
+            )
+        else:
+            self.overlay_window.destroy()
+            self.overlay_window = None
+            self.btn_overlay.configure(
+                text="🎮 Activar Overlay In-Game", 
+                fg_color="#10b981", 
+                hover_color="#059669"
+            )
+
     def create_metric_card(self, parent, title, color):
         card = ctk.CTkFrame(parent, fg_color=BG_CARD, border_width=1, border_color=BORDER_COLOR, corner_radius=12)
         lbl_title = ctk.CTkLabel(card, text=title, font=("Segoe UI", 10, "bold"), text_color=COLOR_TEXT_DIM)
@@ -246,7 +282,6 @@ class App(ctk.CTk):
         for d in disks_data:
             idx = d["index"]
             
-            # Si el widget del disco no existe, construirlo
             if idx not in self.disk_widgets:
                 card = ctk.CTkFrame(self.scroll_disks, fg_color=BG_CARD, border_width=1, border_color=BORDER_COLOR, corner_radius=10)
                 card.pack(fill="x", pady=4, padx=2)
@@ -275,7 +310,6 @@ class App(ctk.CTk):
                     "bar": bar
                 }
 
-            # Actualizar valores del disco
             w = self.disk_widgets[idx]
             w["lbl_name"].configure(text=f"💽 Disco {idx}: {d['model']} [{d['mount_points']}] ({d['total_gb']} GB)")
             
