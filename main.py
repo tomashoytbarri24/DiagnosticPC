@@ -145,9 +145,15 @@ class DuplicateScannerWindow(ctk.CTkToplevel):
         self.after(0, self._render_results, duplicates)
 
     def _update_status_safe(self, text):
-        self.after(0, lambda: self.lbl_status.configure(text=text))
+        """Verifica que la ventana siga abierta antes de actualizar el texto de estado."""
+        if self.winfo_exists():
+            self.after(0, lambda: self.lbl_status.configure(text=text) if self.winfo_exists() else None)
 
     def _render_results(self, duplicates):
+        """Previene renderizar si la ventana fue cerrada durante el escaneo."""
+        if not self.winfo_exists():
+            return
+
         self.progress_bar.stop()
         self.progress_bar.configure(mode="determinate")
         self.progress_bar.set(1.0)
@@ -173,7 +179,6 @@ class DuplicateScannerWindow(ctk.CTkToplevel):
             lbl_header = ctk.CTkLabel(card, text=f"📄 Grupo Duplicado ({len(paths)} copias) — Tamaño por copia: {size_mb} MB", font=("Segoe UI", 10, "bold"), text_color="#38bdf8")
             lbl_header.pack(anchor="w", padx=10, pady=(6, 4))
 
-            group_checkboxes = []
             for idx, path in enumerate(paths):
                 row = ctk.CTkFrame(card, fg_color="transparent")
                 row.pack(fill="x", padx=10, pady=2)
