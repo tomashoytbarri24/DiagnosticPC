@@ -1,4 +1,4 @@
-﻿import customtkinter as ctk
+import customtkinter as ctk
 import threading
 import time
 import psutil
@@ -16,6 +16,15 @@ from matplotlib.figure import Figure
 
 from core.telemetry import get_system_telemetry, get_all_disks_data, calculate_preliminary_score
 from core.report_generator import generate_pdf_report
+from core.cleaner import (
+    calculate_cleanable_space_mb, 
+    clean_temp_files, 
+    empty_recycle_bin, 
+    flush_dns_cache, 
+    optimize_ram_memory,
+    find_duplicate_files,
+    delete_duplicate_file
+)
 from database.db import init_db, save_telemetry_record
 from gui.overlay import GameOverlay
 
@@ -30,6 +39,196 @@ COLOR_CPU = "#38bdf8"
 COLOR_RAM = "#10b981"     
 COLOR_GPU = "#a855f7"     
 COLOR_TEXT_DIM = "#94a3b8"
+
+class DuplicateScannerWindow(ctk.CTkToplevel):
+    def __init__(self, master=None, **kwargs):
+        super().__init__(master, **kwargs)
+        self.title("Buscador de Archivos Duplicados")
+        self.geometry("900x650")
+        self.configure(fg_color=BG_MAIN)
+
+        self.lift()
+        self.focus_force()
+
+        self.grid_columnconfigure(0, weight=1)
+        self.grid_rowconfigure(3, weight=1)
+
+        # 1. PANEL SUPERIOR DE RUTA
+        frame_top = ctk.CTkFrame(self, fg_color=BG_CARD, corner_radius=10, border_width=1, border_color=BORDER_COLOR)
+        frame_top.grid(row=0, column=0, padx=15, pady=(15, 5), sticky="ew")
+
+        ctk.CTkLabel(frame_top, text="Carpeta:", font=("Segoe UI", 11, "bold")).pack(side="left", padx=10, pady=10)
+
+        # Ruta por defecto automática (Carpeta Descargas del usuario)
+        default_folder = os.path.expanduser("~/Downloads")
+        self.entry_path = ctk.CTkEntry(frame_top, font=("Segoe UI", 10))
+        self.entry_path.insert(0, default_folder if os.path.exists(default_folder) else "C:\\")
+        self.entry_path.pack(side="left", fill="x", expand=True, padx=5, pady=10)
+
+        btn_browse = ctk.CTkButton(frame_top, text="📁 Buscar", width=80, fg_color="#3b82f6", hover_color="#2563eb", command=self.browse_folder)
+        btn_browse.pack(side="left", padx=5, pady=10)
+
+        self.btn_scan = ctk.CTkButton(frame_top, text="🔍 Iniciar Escaneo", width=130, fg_color="#10b981", hover_color="#059669", command=self.start_scan)
+        self.btn_scan.pack(side="left", padx=(5, 10), pady=10)
+
+        # 2. ACCESOS RÁPIDOS Y ACCIONES EN LOTE
+        frame_actions = ctk.CTkFrame(self, fg_color="transparent")
+        frame_actions.grid(row=1, column=0, padx=15, pady=5, sticky="ew")
+
+        ctk.CTkLabel(frame_actions, text="Accesos rápidos:", font=("Segoe UI", 10, "bold"), text_color=COLOR_TEXT_DIM).pack(side="left", padx=(0, 5))
+        
+        btn_preset_downloads = ctk.CTkButton(frame_actions, text="📥 Descargas", width=90, height=26, fg_color="#1e293b", hover_color="#334155", command=lambda: self.set_preset_path(os.path.expanduser("~/Downloads")))
+        btn_preset_downloads.pack(side="left", padx=3)
+
+        btn_preset_docs = ctk.CTkButton(frame_actions, text="📄 Documentos", width=95, height=26, fg_color="#1e293b", hover_color="#334155", command=lambda: self.set_preset_path(os.path.expanduser("~/Documents")))
+        btn_preset_docs.pack(side="left", padx=3)
+
+        btn_preset_c = ctk.CTkButton(frame_actions, text="💾 Disco C:", width=80, height=26, fg_color="#1e293b", hover_color="#334155", command=lambda: self.set_preset_path("C:\\"))
+        btn_preset_c.pack(side="left", padx=3)
+
+        self.btn_auto_select = ctk.CTkButton(frame_actions, text="⚡ Auto-Seleccionar Copias", width=160, height=26, fg_color="#8b5cf6", hover_color="#7c3aed", state="disabled", command=self.auto_select_duplicates)
+        self.btn_auto_select.pack(side="right", padx=3)
+
+        self.btn_delete_selected = ctk.CTkButton(frame_actions, text="🗑️ Eliminar Seleccionados", width=160, height=26, fg_color="#ef4444", hover_color="#dc2626", state="disabled", command=self.delete_selected_batch)
+        self.btn_delete_selected.pack(side="right", padx=3)
+
+        # 3. ESTADO Y BARRA DE PROGRESO
+        frame_status = ctk.CTkFrame(self, fg_color="transparent")
+        frame_status.grid(row=2, column=0, padx=15, pady=(5, 5), sticky="ew")
+
+        self.lbl_status = ctk.CTkLabel(frame_status, text="Presiona 'Iniciar Escaneo' o elige un acceso rápido.", font=("Segoe UI", 10), text_color=COLOR_TEXT_DIM)
+        self.lbl_status.pack(anchor="w", side="top", pady=(0, 2))
+
+        self.progress_bar = ctk.CTkProgressBar(frame_status, height=6, progress_color="#38bdf8", fg_color="#0f172a")
+        self.progress_bar.set(0)
+        self.progress_bar.pack(fill="x", side="bottom")
+
+        # 4. ÁREA DE RESULTADOS
+        self.scroll_results = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        self.scroll_results.grid(row=3, column=0, padx=15, pady=(0, 15), sticky="nsew")
+
+        self.checkboxes_map = {}
+
+    def set_preset_path(self, path):
+        if os.path.exists(path):
+            self.entry_path.delete(0, "end")
+            self.entry_path.insert(0, path)
+            self.start_scan()
+
+    def browse_folder(self):
+        folder = filedialog.askdirectory(title="Selecciona la carpeta para escanear duplicados")
+        if folder:
+            self.entry_path.delete(0, "end")
+            self.entry_path.insert(0, folder)
+
+    def start_scan(self):
+        path = self.entry_path.get().strip()
+        if not path or not os.path.exists(path):
+            messagebox.showwarning("DiagnosticPC", "Por favor selecciona una ruta válida.", parent=self)
+            return
+
+        self.btn_scan.configure(state="disabled")
+        self.btn_auto_select.configure(state="disabled")
+        self.btn_delete_selected.configure(state="disabled")
+        self.lbl_status.configure(text=f"Escaneando carpeta: {path}...", text_color="#38bdf8")
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.start()
+
+        for widget in self.scroll_results.winfo_children():
+            widget.destroy()
+        self.checkboxes_map.clear()
+
+        threading.Thread(target=self._run_scan_thread, args=(path,), daemon=True).start()
+
+    def _run_scan_thread(self, target_path):
+        duplicates = find_duplicate_files(target_path, status_callback=self._update_status_safe)
+        self.after(0, self._render_results, duplicates)
+
+    def _update_status_safe(self, text):
+        self.after(0, lambda: self.lbl_status.configure(text=text))
+
+    def _render_results(self, duplicates):
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(1.0)
+        self.btn_scan.configure(state="normal")
+
+        if not duplicates:
+            self.lbl_status.configure(text="¡No se encontraron archivos duplicados en esta ruta!", text_color="#10b981")
+            return
+
+        total_groups = len(duplicates)
+        total_files = sum(len(paths) for paths in duplicates.values())
+        self.lbl_status.configure(text=f"Se encontraron {total_groups} grupos de duplicados ({total_files} archivos en total).", text_color="#f59e0b")
+
+        self.btn_auto_select.configure(state="normal")
+        self.btn_delete_selected.configure(state="normal")
+
+        for (file_hash, size), paths in duplicates.items():
+            size_mb = round(size / (1024**2), 2)
+            
+            card = ctk.CTkFrame(self.scroll_results, fg_color=BG_CARD, corner_radius=8, border_width=1, border_color=BORDER_COLOR)
+            card.pack(fill="x", pady=5, padx=2)
+
+            lbl_header = ctk.CTkLabel(card, text=f"📄 Grupo Duplicado ({len(paths)} copias) — Tamaño por copia: {size_mb} MB", font=("Segoe UI", 10, "bold"), text_color="#38bdf8")
+            lbl_header.pack(anchor="w", padx=10, pady=(6, 4))
+
+            group_checkboxes = []
+            for idx, path in enumerate(paths):
+                row = ctk.CTkFrame(card, fg_color="transparent")
+                row.pack(fill="x", padx=10, pady=2)
+
+                chk_var = ctk.BooleanVar(value=False)
+                chk = ctk.CTkCheckBox(row, text="", variable=chk_var, width=20)
+                chk.pack(side="left", padx=(0, 5))
+
+                lbl_tag = " [ORIGINAL]" if idx == 0 else " [COPIA]"
+                tag_color = "#10b981" if idx == 0 else COLOR_TEXT_DIM
+
+                lbl_path = ctk.CTkLabel(row, text=path + lbl_tag, font=("Segoe UI", 9), text_color=tag_color, anchor="w")
+                lbl_path.pack(side="left", fill="x", expand=True)
+
+                self.checkboxes_map[path] = {
+                    "var": chk_var,
+                    "row": row,
+                    "card": card,
+                    "is_original": (idx == 0)
+                }
+
+    def auto_select_duplicates(self):
+        """Marca automáticamente todas las copias secundarias conservando el primer archivo."""
+        selected_count = 0
+        for item in self.checkboxes_map.values():
+            if not item["is_original"]:
+                item["var"].set(True)
+                selected_count += 1
+            else:
+                item["var"].set(False)
+        messagebox.showinfo("Auto-Selección", f"Se seleccionaron automáticamente {selected_count} copias duplicadas para eliminar (manteniendo las versiones originales).", parent=self)
+
+    def delete_selected_batch(self):
+        """Elimina todos los archivos cuyas casillas estén marcadas."""
+        to_delete = [path for path, item in self.checkboxes_map.items() if item["var"].get()]
+        
+        if not to_delete:
+            messagebox.showwarning("DiagnosticPC", "No has seleccionado ninguna copia para eliminar.", parent=self)
+            return
+
+        if messagebox.askyesno("Confirmar Eliminación en Lote", f"¿Estás seguro de eliminar permanentemente los {len(to_delete)} archivos seleccionados?", parent=self):
+            deleted_count = 0
+            for path in to_delete:
+                if delete_duplicate_file(path):
+                    deleted_count += 1
+                    item = self.checkboxes_map[path]
+                    item["row"].destroy()
+                    
+                    card = item["card"]
+                    remaining = [w for w in card.winfo_children() if isinstance(w, ctk.CTkFrame)]
+                    if len(remaining) <= 1:
+                        card.destroy()
+
+            messagebox.showinfo("Proceso Finalizado", f"Se eliminaron {deleted_count} archivos duplicados con éxito.", parent=self)
+            self.lbl_status.configure(text=f"Limpieza completada: {deleted_count} archivos eliminados.", text_color="#10b981")
 
 class App(ctk.CTk):
     def __init__(self):
@@ -51,7 +250,6 @@ class App(ctk.CTk):
         self.bind("<F11>", self.toggle_fullscreen)
         self.bind("<Escape>", self.exit_fullscreen)
 
-        # Anti-lag estricto al redimensionar con el mouse
         self.is_resizing = False
         self.resize_timer = None
         self.bind("<Configure>", self.on_window_resize)
@@ -59,6 +257,7 @@ class App(ctk.CTk):
         init_db()
 
         self.overlay_window = None
+        self.duplicate_window = None
         self.latest_telemetry = None
         self.latest_disks = []
         self.latest_score = 100.0
@@ -171,7 +370,33 @@ class App(ctk.CTk):
             corner_radius=8,
             command=self.export_pdf_report
         )
-        self.btn_pdf.pack(fill="x", padx=12, pady=(5, 0))
+        self.btn_pdf.pack(fill="x", padx=12, pady=(5, 5))
+
+        self.btn_clean = ctk.CTkButton(
+            self.sidebar,
+            text="🧹 Limpiar Sistema",
+            fg_color="#8b5cf6",
+            hover_color="#7c3aed",
+            text_color="#ffffff",
+            font=("Segoe UI", 11, "bold"),
+            height=34,
+            corner_radius=8,
+            command=self.run_system_cleanup
+        )
+        self.btn_clean.pack(fill="x", padx=12, pady=(0, 5))
+
+        self.btn_duplicates = ctk.CTkButton(
+            self.sidebar,
+            text="🔍 Archivos Duplicados",
+            fg_color="#ec4899",
+            hover_color="#db2777",
+            text_color="#ffffff",
+            font=("Segoe UI", 11, "bold"),
+            height=34,
+            corner_radius=8,
+            command=self.open_duplicate_scanner
+        )
+        self.btn_duplicates.pack(fill="x", padx=12, pady=(0, 0))
 
         self.lbl_footer = ctk.CTkLabel(
             self.sidebar,
@@ -256,12 +481,38 @@ class App(ctk.CTk):
 
         self.update_charts_fast()
 
+    def open_duplicate_scanner(self):
+        """Abre la ventana dedicada al escáner de duplicados trayéndola al frente."""
+        if self.duplicate_window is None or not self.duplicate_window.winfo_exists():
+            self.duplicate_window = DuplicateScannerWindow(master=self)
+        else:
+            self.duplicate_window.lift()
+            self.duplicate_window.focus_force()
+
+    def run_system_cleanup(self):
+        res = clean_temp_files()
+        empty_recycle_bin()
+        dns_ok = flush_dns_cache()
+        ram_ok = optimize_ram_memory()
+
+        messagebox.showinfo(
+            "Limpieza Completada",
+            f"¡Mantenimiento finalizado con éxito!\n\n"
+            f"• Espacio liberado: {res['freed_mb']} MB\n"
+            f"• Archivos eliminados: {res['deleted_files']}\n"
+            f"• Papelera de Reciclaje vaciada.\n"
+            f"• Caché DNS: {'Restablecida' if dns_ok else 'Omitida'}\n"
+            f"• Memoria RAM: Limpieza Profunda Ejecutada"
+        )
+
+        self.latest_disks = get_all_disks_data()
+        self.update_disks_ui(self.latest_disks)
+
     def on_window_resize(self, event):
         if event.widget == self:
             self.is_resizing = True
             if self.resize_timer:
                 self.after_cancel(self.resize_timer)
-            # Pausa el renderizado 300ms hasta soltar el borde
             self.resize_timer = self.after(300, self.finish_resizing)
 
     def finish_resizing(self):
@@ -446,7 +697,6 @@ class App(ctk.CTk):
                 )
                 self.db_counter = 0
 
-            # Actualización UI con nombres exactos de Hardware
             self.card_cpu.winfo_children()[0].configure(text=f"CPU: {t['cpu_name']}")
             self.lbl_cpu.configure(text=f"{t['cpu_usage']}%")
             self.bar_cpu.set(t["cpu_usage"] / 100.0)
