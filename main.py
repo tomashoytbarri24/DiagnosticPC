@@ -7,6 +7,7 @@ import os
 from collections import deque
 from tkinter import messagebox, filedialog
 from datetime import datetime
+from PIL import Image
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -18,80 +19,101 @@ from core.report_generator import generate_pdf_report
 from database.db import init_db, save_telemetry_record
 from gui.overlay import GameOverlay
 
-# Configuración Visual Global
 ctk.set_appearance_mode("Dark")
 
-BG_MAIN = "#0b0f19"       # Fondo general
-BG_CARD = "#151c2c"       # Fondo de tarjetas
-BG_SIDEBAR = "#0d1322"    # Fondo de barra lateral
-BORDER_COLOR = "#232f48"  # Bordes sutiles
+BG_MAIN = "#0b0f19"       
+BG_CARD = "#151c2c"       
+BG_SIDEBAR = "#0d1322"    
+BORDER_COLOR = "#232f48"  
 
-COLOR_CPU = "#38bdf8"     # Cyan
-COLOR_RAM = "#10b981"     # Emerald Green
-COLOR_GPU = "#a855f7"     # Purple
-COLOR_TEXT_DIM = "#94a3b8"# Texto secundario
+COLOR_CPU = "#38bdf8"     
+COLOR_RAM = "#10b981"     
+COLOR_GPU = "#a855f7"     
+COLOR_TEXT_DIM = "#94a3b8"
 
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
 
         self.title("DiagnosticPC - Predictive Analytics Dashboard")
-        
-        # Tamaño MEDIANO inicial (no gigante)
         self.geometry("1000x700")
         self.resizable(True, True)
         self.configure(fg_color=BG_MAIN)
 
-        # Estado de Pantalla Completa
-        self.is_fullscreen = False
+        icon_path = os.path.join("assets", "app_icon.ico")
+        if os.path.exists(icon_path):
+            try:
+                self.iconbitmap(icon_path)
+            except Exception:
+                pass
 
-        # Atajos de Teclado (F11 y Escape)
+        self.is_fullscreen = False
         self.bind("<F11>", self.toggle_fullscreen)
         self.bind("<Escape>", self.exit_fullscreen)
+
+        # Anti-lag estricto al redimensionar con el mouse
+        self.is_resizing = False
+        self.resize_timer = None
+        self.bind("<Configure>", self.on_window_resize)
 
         init_db()
 
         self.overlay_window = None
-
-        # Variables de telemetría guardadas en memoria
         self.latest_telemetry = None
         self.latest_disks = []
         self.latest_score = 100.0
 
-        # Buffer para las últimas 25 lecturas
         self.max_points = 25
         self.cpu_history = deque([0]*self.max_points, maxlen=self.max_points)
         self.ram_history = deque([0]*self.max_points, maxlen=self.max_points)
         self.gpu_history = deque([0]*self.max_points, maxlen=self.max_points)
 
-        # ----------------------------------------------------
-        # 1. LAYOUT PRINCIPAL
-        # ----------------------------------------------------
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
         # SIDEBAR
-        self.sidebar = ctk.CTkFrame(self, fg_color=BG_SIDEBAR, corner_radius=0, width=220)
+        self.sidebar = ctk.CTkFrame(self, fg_color=BG_SIDEBAR, corner_radius=0, width=230)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
         self.sidebar.grid_propagate(False)
 
+        self.frame_logo = ctk.CTkFrame(self.sidebar, fg_color="transparent")
+        self.frame_logo.pack(anchor="w", padx=15, pady=(20, 2), fill="x")
+
+        logo_img_path = None
+        for possible_path in [
+            os.path.join("assets", "logo_neon_pulse.png"),
+            os.path.join("assets", "logo_shield_health.png"),
+            os.path.join("assets", "logo.png")
+        ]:
+            if os.path.exists(possible_path):
+                logo_img_path = possible_path
+                break
+
+        if logo_img_path:
+            try:
+                pil_img = Image.open(logo_img_path)
+                self.ctk_logo = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=(28, 28))
+                self.lbl_logo_icon = ctk.CTkLabel(self.frame_logo, image=self.ctk_logo, text="")
+                self.lbl_logo_icon.pack(side="left", padx=(0, 8))
+            except Exception:
+                pass
+
         self.lbl_brand = ctk.CTkLabel(
-            self.sidebar,
-            text="⚡ DiagnosticPC",
+            self.frame_logo,
+            text="DiagnosticPC",
             font=("Segoe UI", 18, "bold"),
             text_color="#f8fafc"
         )
-        self.lbl_brand.pack(anchor="w", padx=15, pady=(20, 2))
+        self.lbl_brand.pack(side="left")
 
         self.lbl_subtitle = ctk.CTkLabel(
             self.sidebar,
-            text="Predictive Telemetry",
+            text="Predictive Telemetry Engine",
             font=("Segoe UI", 10),
             text_color=COLOR_TEXT_DIM
         )
         self.lbl_subtitle.pack(anchor="w", padx=15, pady=(0, 15))
 
-        # Tarjeta de Salud Global
         self.card_health_sidebar = ctk.CTkFrame(
             self.sidebar,
             fg_color=BG_CARD,
@@ -125,7 +147,6 @@ class App(ctk.CTk):
         )
         self.lbl_health_status.pack(anchor="w", padx=12, pady=(0, 10))
 
-        # Botón Overlay
         self.btn_overlay = ctk.CTkButton(
             self.sidebar,
             text="🎮 Overlay In-Game",
@@ -139,7 +160,6 @@ class App(ctk.CTk):
         )
         self.btn_overlay.pack(fill="x", padx=12, pady=(15, 5))
 
-        # Botón PDF
         self.btn_pdf = ctk.CTkButton(
             self.sidebar,
             text="📄 Exportar PDF",
@@ -153,27 +173,23 @@ class App(ctk.CTk):
         )
         self.btn_pdf.pack(fill="x", padx=12, pady=(5, 0))
 
-        # Footer atajos abajo a la izquierda
         self.lbl_footer = ctk.CTkLabel(
             self.sidebar,
-            text="[F11] Pantalla Completa\n[Esc] Salir",
+            text="[F11] Pantalla Completa\n[Esc] Modo Ventana",
             font=("Segoe UI", 9),
             text_color=COLOR_TEXT_DIM,
             justify="center"
         )
         self.lbl_footer.pack(side="bottom", pady=12, padx=10)
 
-        # ----------------------------------------------------
-        # 2. CONTENIDO PRINCIPAL
-        # ----------------------------------------------------
+        # MAIN CONTENT
         self.main_content = ctk.CTkFrame(self, fg_color="transparent")
         self.main_content.grid(row=0, column=1, sticky="nsew", padx=15, pady=15)
 
-        # Tarjetas Superiores (CPU, RAM, GPU)
         self.frame_meters = ctk.CTkFrame(self.main_content, fg_color="transparent")
         self.frame_meters.pack(fill="x", pady=(0, 10))
 
-        self.card_cpu = self.create_metric_card(self.frame_meters, "PROCESADOR (CPU)", COLOR_CPU)
+        self.card_cpu = self.create_metric_card(self.frame_meters, "CPU", COLOR_CPU)
         self.card_cpu.pack(side="left", expand=True, fill="both", padx=(0, 5))
         self.lbl_cpu, self.bar_cpu, self.lbl_cpu_temp = self.build_card_content(self.card_cpu, COLOR_CPU)
 
@@ -181,11 +197,10 @@ class App(ctk.CTk):
         self.card_ram.pack(side="left", expand=True, fill="both", padx=3)
         self.lbl_ram, self.bar_ram, self.lbl_ram_gb = self.build_card_content(self.card_ram, COLOR_RAM, hide_sublabel=False)
 
-        self.card_gpu = self.create_metric_card(self.frame_meters, "GRÁFICA (GPU)", COLOR_GPU)
+        self.card_gpu = self.create_metric_card(self.frame_meters, "GPU", COLOR_GPU)
         self.card_gpu.pack(side="left", expand=True, fill="both", padx=(5, 0))
         self.lbl_gpu, self.bar_gpu, self.lbl_gpu_temp = self.build_card_content(self.card_gpu, COLOR_GPU)
 
-        # Multi-Disco
         self.lbl_disks_header = ctk.CTkLabel(
             self.main_content,
             text="UNIDADES DE ALMACENAMIENTO DETECTADAS",
@@ -202,7 +217,6 @@ class App(ctk.CTk):
         self.scroll_disks.pack(fill="x", pady=(0, 10))
         self.disk_widgets = {}
 
-        # Gráficos
         self.frame_charts = ctk.CTkFrame(
             self.main_content,
             fg_color=BG_CARD,
@@ -234,7 +248,6 @@ class App(ctk.CTk):
         self.background = None
         self.canvas.mpl_connect("draw_event", self.on_draw)
 
-        # Hilo de telemetría optimizado
         self.is_running = True
         self.db_counter = 0
 
@@ -242,6 +255,18 @@ class App(ctk.CTk):
         self.thread.start()
 
         self.update_charts_fast()
+
+    def on_window_resize(self, event):
+        if event.widget == self:
+            self.is_resizing = True
+            if self.resize_timer:
+                self.after_cancel(self.resize_timer)
+            # Pausa el renderizado 300ms hasta soltar el borde
+            self.resize_timer = self.after(300, self.finish_resizing)
+
+    def finish_resizing(self):
+        self.is_resizing = False
+        self.background = None
 
     def toggle_fullscreen(self, event=None):
         self.is_fullscreen = not self.is_fullscreen
@@ -253,7 +278,6 @@ class App(ctk.CTk):
             self.attributes("-fullscreen", False)
 
     def export_pdf_report(self):
-        """ Diálogo interactivo para guardar el PDF con fecha/hora por defecto """
         if not self.latest_telemetry:
             messagebox.showwarning("DiagnosticPC", "Aún no hay datos de telemetría para exportar.")
             return
@@ -322,18 +346,21 @@ class App(ctk.CTk):
             self.background = self.canvas.copy_from_bbox(self.fig.bbox)
 
     def update_charts_fast(self):
-        if self.is_running and self.background is not None:
-            self.canvas.restore_region(self.background)
+        if self.is_running and self.background is not None and not self.is_resizing:
+            try:
+                self.canvas.restore_region(self.background)
 
-            self.line_cpu.set_ydata(list(self.cpu_history))
-            self.line_ram.set_ydata(list(self.ram_history))
-            self.line_gpu.set_ydata(list(self.gpu_history))
+                self.line_cpu.set_ydata(list(self.cpu_history))
+                self.line_ram.set_ydata(list(self.ram_history))
+                self.line_gpu.set_ydata(list(self.gpu_history))
 
-            self.ax_cpu.draw_artist(self.line_cpu)
-            self.ax_ram.draw_artist(self.line_ram)
-            self.ax_gpu.draw_artist(self.line_gpu)
+                self.ax_cpu.draw_artist(self.line_cpu)
+                self.ax_ram.draw_artist(self.line_ram)
+                self.ax_gpu.draw_artist(self.line_gpu)
 
-            self.canvas.blit(self.fig.bbox)
+                self.canvas.blit(self.fig.bbox)
+            except Exception:
+                pass
 
         if self.is_running:
             self.after(33, self.update_charts_fast)
@@ -392,7 +419,6 @@ class App(ctk.CTk):
         while self.is_running:
             t = get_system_telemetry()
 
-            # Optimización: Los discos se consultan cada 5 segundos (20 iteraciones de 0.25s)
             if disk_timer % 20 == 0 or not disks:
                 disks = get_all_disks_data()
             disk_timer += 1
@@ -420,7 +446,8 @@ class App(ctk.CTk):
                 )
                 self.db_counter = 0
 
-            # UI Update
+            # Actualización UI con nombres exactos de Hardware
+            self.card_cpu.winfo_children()[0].configure(text=f"CPU: {t['cpu_name']}")
             self.lbl_cpu.configure(text=f"{t['cpu_usage']}%")
             self.bar_cpu.set(t["cpu_usage"] / 100.0)
             self.lbl_cpu_temp.configure(text=f"Temp: {t['cpu_temp']} °C")
@@ -429,6 +456,7 @@ class App(ctk.CTk):
             self.bar_ram.set(t["ram_usage"] / 100.0)
             self.lbl_ram_gb.configure(text=f"{t['ram_used_gb']} GB / {t['ram_total_gb']} GB")
 
+            self.card_gpu.winfo_children()[0].configure(text=f"GPU: {t['gpu_name']}")
             self.lbl_gpu.configure(text=f"{t['gpu_usage']}%")
             self.bar_gpu.set(t["gpu_usage"] / 100.0)
             self.lbl_gpu_temp.configure(text=f"Temp: {t['gpu_temp']} °C")
