@@ -1,3 +1,4 @@
+@"
 # Python
 __pycache__/
 *.py[cod]
@@ -8,10 +9,14 @@ __pycache__/
 venv/
 env/
 
-# Base de datos local (para que cada quien genere su propia DB de prueba)
+# Base de datos local
 *.db
 *.sqlite3
 
 # VS Code / IDEs
 .vscode/
 .idea/
+
+# API keys
+.env
+"@ | Set-Content .gitignore

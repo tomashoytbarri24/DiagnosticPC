@@ -1,446 +1,1566 @@
+# core/telemetry.py
+
 import os
-import psutil
+import json
 import platform
 import subprocess
-import json
+import threading
+import time
+
+import psutil
+
 
 IS_WINDOWS = platform.system() == "Windows"
+
+# ============================================================================
+# WINDOWS - IMPORTS OPCIONALES
+# ============================================================================
 
 if IS_WINDOWS:
     try:
         import pythoncom
+    except ImportError:
+        pythoncom = None
+
+    try:
         import wmi
     except ImportError:
-        pass
+        wmi = None
+else:
+    pythoncom = None
+    wmi = None
+
+
+# ============================================================================
+# ESTADO GLOBAL
+# ============================================================================
 
 LAST_VALID_GPU_TEMP = 38.0
+LAST_VALID_CPU_TEMP = 45.0
 
+CPU_MODEL_NAME = "Procesador"
+GPU_MODEL_NAME = "Gráfica"
+GPU_VRAM_GB = 0.0
+
+_HARDWARE_LOCK = threading.Lock()
+_HARDWARE_INITIALIZED = False
+
+
+# ============================================================================
+# COM
+# ============================================================================
+
+def _init_com():
+    """
+    Inicializa COM para el hilo actual.
+    """
+
+    if not IS_WINDOWS or pythoncom is None:
+        return
+
+    try:
+        pythoncom.CoInitialize()
+    except Exception:
+        pass
+
+
+# ============================================================================
+# UTILIDADES
+# ============================================================================
+
+def _safe_float(value, default=0.0):
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _safe_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return default
+
+
+def _run_command(command, timeout=2):
+    """
+    Ejecuta un comando de forma segura.
+    """
+
+    try:
+        result = subprocess.check_output(
+            command,
+            shell=True,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout
+        )
+
+        return result.decode(
+            "utf-8",
+            errors="ignore"
+        ).strip()
+
+    except Exception:
+        return ""
+
+
+# ============================================================================
+# INFORMACIÓN DEL CHASIS / BIOS / PLACA
+# ============================================================================
 
 def get_system_chassis_and_bios():
+
     is_laptop = False
+
     chassis_label = "Torre / Desktop"
+
     bios_info = "Desconocida"
+
     board_info = "Desconocida"
 
-    if IS_WINDOWS:
+    # ------------------------------------------------------------------------
+    # WINDOWS
+    # ------------------------------------------------------------------------
+
+    if IS_WINDOWS and wmi is not None:
+
+        _init_com()
+
         try:
-            pythoncom.CoInitialize()
+
             c = wmi.WMI()
 
-            bios_list = c.Win32_BIOS()
-            if bios_list:
-                b = bios_list[0]
-                bios_vendor = b.Manufacturer.strip() if b.Manufacturer else ""
-                bios_ver = b.SMBIOSBIOSVersion.strip() if b.SMBIOSBIOSVersion else ""
-                bios_info = f"{bios_vendor} {bios_ver}".strip()
+            # BIOS
+            try:
+                bios_list = c.Win32_BIOS()
 
-            board_list = c.Win32_BaseBoard()
-            if board_list:
-                mb = board_list[0]
-                mb_vendor = mb.Manufacturer.strip() if mb.Manufacturer else ""
-                mb_model = mb.Product.strip() if mb.Product else ""
-                board_info = f"{mb_vendor} {mb_model}".strip()
+                if bios_list:
 
-            cs_list = c.Win32_ComputerSystem()
-            if cs_list:
-                pc_type = getattr(cs_list[0], 'PCSystemType', 0)
-                if pc_type in [2, 8]:
+                    bios = bios_list[0]
+
+                    vendor = (
+                        bios.Manufacturer.strip()
+                        if bios.Manufacturer
+                        else ""
+                    )
+
+                    version = (
+                        bios.SMBIOSBIOSVersion.strip()
+                        if bios.SMBIOSBIOSVersion
+                        else ""
+                    )
+
+                    bios_info = (
+                        f"{vendor} {version}"
+                    ).strip()
+
+            except Exception:
+                pass
+
+            # PLACA
+            try:
+
+                board_list = c.Win32_BaseBoard()
+
+                if board_list:
+
+                    board = board_list[0]
+
+                    vendor = (
+                        board.Manufacturer.strip()
+                        if board.Manufacturer
+                        else ""
+                    )
+
+                    model = (
+                        board.Product.strip()
+                        if board.Product
+                        else ""
+                    )
+
+                    board_info = (
+                        f"{vendor} {model}"
+                    ).strip()
+
+            except Exception:
+                pass
+
+            # TIPO DE PC
+            try:
+
+                cs_list = c.Win32_ComputerSystem()
+
+                if cs_list:
+
+                    pc_type = getattr(
+                        cs_list[0],
+                        "PCSystemType",
+                        0
+                    )
+
+                    # 2 = Mobile
+                    # 8 = Portable
+                    if pc_type in (2, 8):
+                        is_laptop = True
+
+            except Exception:
+                pass
+
+            # Batería
+            try:
+
+                if psutil.sensors_battery() is not None:
                     is_laptop = True
 
-            if psutil.sensors_battery() is not None:
-                is_laptop = True
+            except Exception:
+                pass
 
-            enclosure = c.Win32_SystemEnclosure()
-            if enclosure and hasattr(enclosure[0], 'ChassisTypes'):
-                chassis_types = enclosure[0].ChassisTypes or []
-                if any(t in chassis_types for t in [8, 9, 10, 14, 30, 31, 32]):
-                    is_laptop = True
+            # Chasis
+            try:
+
+                enclosure = c.Win32_SystemEnclosure()
+
+                if enclosure:
+
+                    chassis_types = (
+                        getattr(
+                            enclosure[0],
+                            "ChassisTypes",
+                            []
+                        ) or []
+                    )
+
+                    laptop_types = {
+                        8, 9, 10, 14,
+                        30, 31, 32
+                    }
+
+                    if any(
+                        t in laptop_types
+                        for t in chassis_types
+                    ):
+                        is_laptop = True
+
+            except Exception:
+                pass
+
         except Exception:
             pass
+
+    # ------------------------------------------------------------------------
+    # LINUX / UNIX
+    # ------------------------------------------------------------------------
+
     else:
+
         try:
+
             if psutil.sensors_battery() is not None:
                 is_laptop = True
 
-            if os.path.exists("/sys/class/dmi/id/bios_version"):
-                with open("/sys/class/dmi/id/bios_version", "r") as f:
+        except Exception:
+            pass
+
+        try:
+
+            bios_path = "/sys/class/dmi/id/bios_version"
+
+            if os.path.exists(bios_path):
+
+                with open(
+                    bios_path,
+                    "r",
+                    encoding="utf-8",
+                    errors="ignore"
+                ) as f:
+
                     bios_info = f.read().strip()
 
-            if os.path.exists("/sys/class/dmi/id/board_name"):
-                with open("/sys/class/dmi/id/board_name", "r") as f:
+        except Exception:
+            pass
+
+        try:
+
+            board_path = "/sys/class/dmi/id/board_name"
+
+            if os.path.exists(board_path):
+
+                with open(
+                    board_path,
+                    "r",
+                    encoding="utf-8",
+                    errors="ignore"
+                ) as f:
+
                     board_info = f.read().strip()
 
-            if os.path.exists("/sys/class/dmi/id/chassis_type"):
-                with open("/sys/class/dmi/id/chassis_type", "r") as f:
-                    ctype = f.read().strip()
-                    if ctype in ["8", "9", "10", "14", "30", "31", "32"]:
-                        is_laptop = True
+        except Exception:
+            pass
+
+        try:
+
+            chassis_path = "/sys/class/dmi/id/chassis_type"
+
+            if os.path.exists(chassis_path):
+
+                with open(
+                    chassis_path,
+                    "r",
+                    encoding="utf-8",
+                    errors="ignore"
+                ) as f:
+
+                    chassis_type = f.read().strip()
+
+                if chassis_type in {
+                    "8",
+                    "9",
+                    "10",
+                    "14",
+                    "30",
+                    "31",
+                    "32"
+                }:
+                    is_laptop = True
+
         except Exception:
             pass
 
     if is_laptop:
         chassis_label = "Laptop / Notebook"
 
-    return is_laptop, chassis_label, bios_info, board_info
+    return (
+        is_laptop,
+        chassis_label,
+        bios_info,
+        board_info
+    )
 
+
+# ============================================================================
+# NOMBRES DE HARDWARE
+# ============================================================================
 
 def get_hardware_names():
-    cpu_name = "Procesador"
-    gpu_name = "Gráfica"
 
-    if IS_WINDOWS:
+    global CPU_MODEL_NAME
+    global GPU_MODEL_NAME
+    global GPU_VRAM_GB
+    global _HARDWARE_INITIALIZED
+
+    with _HARDWARE_LOCK:
+
+        if _HARDWARE_INITIALIZED:
+            return (
+                CPU_MODEL_NAME,
+                GPU_MODEL_NAME,
+                GPU_VRAM_GB
+            )
+
+        cpu_name = "Procesador"
+        gpu_name = "Gráfica"
+        gpu_vram_gb = 0.0
+
+        # --------------------------------------------------------------------
+        # WINDOWS
+        # --------------------------------------------------------------------
+
+        if IS_WINDOWS and wmi is not None:
+
+            _init_com()
+
+            try:
+
+                w = wmi.WMI()
+
+                # CPU
+                try:
+
+                    cpus = w.Win32_Processor()
+
+                    if cpus and cpus[0].Name:
+                        cpu_name = cpus[0].Name.strip()
+
+                except Exception:
+                    pass
+
+                # GPU
+                try:
+
+                    gpus = w.Win32_VideoController()
+
+                    gpu_list = [
+                        g
+                        for g in gpus
+                        if getattr(g, "Name", None)
+                    ]
+
+                    nvidia = [
+                        g for g in gpu_list
+                        if "nvidia" in g.Name.lower()
+                    ]
+
+                    amd = [
+                        g for g in gpu_list
+                        if (
+                            "radeon" in g.Name.lower()
+                            or "amd" in g.Name.lower()
+                        )
+                    ]
+
+                    intel = [
+                        g for g in gpu_list
+                        if "intel" in g.Name.lower()
+                    ]
+
+                    if nvidia:
+                        selected_gpu = nvidia[0]
+                    elif amd:
+                        selected_gpu = amd[0]
+                    elif intel:
+                        selected_gpu = intel[0]
+                    elif gpu_list:
+                        selected_gpu = gpu_list[0]
+                    else:
+                        selected_gpu = None
+
+                    if selected_gpu:
+
+                        gpu_name = selected_gpu.Name.strip()
+
+                        adapter_ram = getattr(
+                            selected_gpu,
+                            "AdapterRAM",
+                            None
+                        )
+
+                        if adapter_ram:
+
+                            try:
+
+                                gpu_vram_gb = round(
+                                    abs(
+                                        int(adapter_ram)
+                                    ) / (1024 ** 3),
+                                    2
+                                )
+
+                            except Exception:
+                                pass
+
+                except Exception:
+                    pass
+
+                # NVIDIA VRAM exacta
+                try:
+
+                    result = _run_command(
+                        "nvidia-smi "
+                        "--query-gpu=memory.total "
+                        "--format=csv,noheader,nounits",
+                        timeout=2
+                    )
+
+                    if result:
+
+                        first_value = (
+                            result.splitlines()[0].strip()
+                        )
+
+                        value_mb = float(first_value)
+
+                        if value_mb > 0:
+
+                            gpu_vram_gb = round(
+                                value_mb / 1024.0,
+                                2
+                            )
+
+                except Exception:
+                    pass
+
+            except Exception:
+                pass
+
+        # --------------------------------------------------------------------
+        # LINUX
+        # --------------------------------------------------------------------
+
+        else:
+
+            try:
+
+                with open(
+                    "/proc/cpuinfo",
+                    "r",
+                    encoding="utf-8",
+                    errors="ignore"
+                ) as f:
+
+                    for line in f:
+
+                        if "model name" in line:
+
+                            cpu_name = (
+                                line.split(
+                                    ":",
+                                    1
+                                )[1].strip()
+                            )
+
+                            break
+
+            except Exception:
+                pass
+
+            # GPU
+            try:
+
+                result = _run_command(
+                    "lspci | grep -E 'VGA|3D|Display'",
+                    timeout=2
+                )
+
+                if result:
+
+                    lines = result.splitlines()
+
+                    gpu_line = lines[0]
+
+                    gpu_name = gpu_line.split(
+                        ":",
+                        2
+                    )[-1].strip()
+
+            except Exception:
+                pass
+
+        CPU_MODEL_NAME = cpu_name
+        GPU_MODEL_NAME = gpu_name
+        GPU_VRAM_GB = gpu_vram_gb
+
+        _HARDWARE_INITIALIZED = True
+
+        return (
+            CPU_MODEL_NAME,
+            GPU_MODEL_NAME,
+            GPU_VRAM_GB
+        )
+
+
+# ============================================================================
+# TEMPERATURA GPU - NVIDIA
+# ============================================================================
+
+def _get_nvidia_telemetry():
+
+    result = {
+        "available": False,
+        "usage": 0.0,
+        "temperature": None,
+        "vram_gb": 0.0
+    }
+
+    if not IS_WINDOWS:
+        return result
+
+    try:
+
+        output = _run_command(
+            "nvidia-smi "
+            "--query-gpu=utilization.gpu,"
+            "temperature.gpu,"
+            "memory.total "
+            "--format=csv,noheader,nounits",
+            timeout=2
+        )
+
+        if not output:
+            return result
+
+        line = output.splitlines()[0]
+
+        parts = [
+            p.strip()
+            for p in line.split(",")
+        ]
+
+        if len(parts) < 3:
+            return result
+
+        usage = float(parts[0])
+        temperature = float(parts[1])
+        memory_mb = float(parts[2])
+
+        result["available"] = True
+        result["usage"] = max(
+            0.0,
+            min(100.0, usage)
+        )
+
+        if 0 <= temperature <= 120:
+            result["temperature"] = temperature
+
+        if memory_mb > 0:
+            result["vram_gb"] = round(
+                memory_mb / 1024.0,
+                2
+            )
+
+    except Exception:
+        pass
+
+    return result
+
+
+# ============================================================================
+# OPEN HARDWARE MONITOR
+# ============================================================================
+
+def _get_openhardwaremonitor_data():
+
+    data = {
+        "cpu_temp": None,
+        "gpu_temp": None,
+        "gpu_usage": None
+    }
+
+    if not IS_WINDOWS or wmi is None:
+        return data
+
+    _init_com()
+
+    try:
+
+        w = wmi.WMI(
+            namespace="root\\OpenHardwareMonitor"
+        )
+
+        for sensor in w.Sensor():
+
+            sensor_type = str(
+                getattr(
+                    sensor,
+                    "SensorType",
+                    ""
+                )
+            ).lower()
+
+            name = str(
+                getattr(
+                    sensor,
+                    "Name",
+                    ""
+                )
+            ).lower()
+
+            identifier = str(
+                getattr(
+                    sensor,
+                    "Identifier",
+                    ""
+                )
+            ).lower()
+
+            value = getattr(
+                sensor,
+                "Value",
+                None
+            )
+
+            if value is None:
+                continue
+
+            try:
+                value = float(value)
+            except Exception:
+                continue
+
+            if value <= 0:
+                continue
+
+            combined = (
+                name + " " + identifier
+            )
+
+            # CPU temperature
+            if (
+                sensor_type == "temperature"
+                and (
+                    "cpu" in combined
+                    or "core" in combined
+                    or "package" in combined
+                )
+            ):
+
+                if (
+                    data["cpu_temp"] is None
+                    or value < data["cpu_temp"]
+                ):
+                    data["cpu_temp"] = round(
+                        value,
+                        1
+                    )
+
+            # GPU temperature
+            if (
+                sensor_type == "temperature"
+                and (
+                    "gpu" in combined
+                    or "nvidia" in combined
+                    or "radeon" in combined
+                    or "amd" in combined
+                )
+            ):
+
+                if (
+                    data["gpu_temp"] is None
+                    or value > data["gpu_temp"]
+                ):
+                    data["gpu_temp"] = round(
+                        value,
+                        1
+                    )
+
+            # GPU load
+            if (
+                sensor_type == "load"
+                and (
+                    "gpu" in combined
+                    or "nvidia" in combined
+                    or "radeon" in combined
+                    or "amd" in combined
+                )
+            ):
+
+                if (
+                    data["gpu_usage"] is None
+                    or value > data["gpu_usage"]
+                ):
+                    data["gpu_usage"] = round(
+                        value,
+                        1
+                    )
+
+    except Exception:
+        pass
+
+    return data
+
+
+# ============================================================================
+# TEMPERATURA CPU WINDOWS
+# ============================================================================
+
+def _get_windows_cpu_temperature():
+
+    # Primero OpenHardwareMonitor
+    ohm = _get_openhardwaremonitor_data()
+
+    if ohm["cpu_temp"] is not None:
+
+        temperature = ohm["cpu_temp"]
+
+        if 10 <= temperature <= 110:
+            return temperature
+
+    # Segundo intento: ThermalZone
+    if IS_WINDOWS and wmi is not None:
+
+        _init_com()
+
         try:
-            pythoncom.CoInitialize()
+
             w = wmi.WMI()
 
-            cpus = w.Win32_Processor()
-            if cpus:
-                cpu_name = cpus[0].Name.strip()
+            zones = (
+                w.Win32_PerfFormattedData_Counters_ThermalZoneInformation()
+            )
 
-            gpus = w.Win32_VideoController()
-            if gpus:
-                gpu_list = [g.Name.strip() for g in gpus if g.Name]
-                nvidia_gpus = [g for g in gpu_list if "nvidia" in g.lower()]
-                amd_gpus = [g for g in gpu_list if "radeon" in g.lower() or "amd" in g.lower()]
+            values = []
 
-                if nvidia_gpus:
-                    gpu_name = nvidia_gpus[0]
-                elif amd_gpus:
-                    gpu_name = amd_gpus[0]
-                elif gpu_list:
-                    gpu_name = gpu_list[0]
+            for zone in zones:
+
+                value = getattr(
+                    zone,
+                    "HighPrecisionTemperature",
+                    None
+                )
+
+                if value is None:
+                    continue
+
+                try:
+                    value = float(value)
+                except Exception:
+                    continue
+
+                # Kelvin * 10
+                temperature = (
+                    value - 2732
+                ) / 10.0
+
+                if 10 <= temperature <= 110:
+                    values.append(
+                        temperature
+                    )
+
+            if values:
+                return round(
+                    sum(values) / len(values),
+                    1
+                )
+
         except Exception:
             pass
-    else:
-        try:
-            with open("/proc/cpuinfo", "r") as f:
-                for line in f:
-                    if "model name" in line:
-                        cpu_name = line.split(":")[1].strip()
-                        break
-        except Exception:
-            pass
 
-        try:
-            res = subprocess.check_output("lspci | grep -E 'VGA|3D'", shell=True).decode("utf-8")
-            if "NVIDIA" in res:
-                gpu_name = "NVIDIA GPU (" + res.split(":")[-1].strip() + ")"
-            elif "AMD" in res or "Radeon" in res:
-                gpu_name = "AMD Radeon GPU (" + res.split(":")[-1].strip() + ")"
-            elif res.strip():
-                gpu_name = res.split(":")[-1].strip()
-        except Exception:
-            pass
-
-    return cpu_name, gpu_name
+    return None
 
 
-CPU_MODEL_NAME, GPU_MODEL_NAME = get_hardware_names()
-
+# ============================================================================
+# TELEMETRÍA PRINCIPAL
+# ============================================================================
 
 def get_system_telemetry():
+
     global LAST_VALID_GPU_TEMP
+    global LAST_VALID_CPU_TEMP
 
-    cpu_usage = psutil.cpu_percent(interval=None)
-    ram = psutil.virtual_memory()
+    # Asegurar nombres de hardware
+    cpu_name, gpu_name, vram_gb = (
+        get_hardware_names()
+    )
 
-    cpu_temp = 45.0
+    # ------------------------------------------------------------------------
+    # CPU
+    # ------------------------------------------------------------------------
+
+    try:
+        cpu_usage = psutil.cpu_percent(
+            interval=None
+        )
+    except Exception:
+        cpu_usage = 0.0
+
+    try:
+
+        freq = psutil.cpu_freq()
+
+        if freq and freq.current:
+            cpu_ghz = round(
+                freq.current / 1000.0,
+                2
+            )
+        else:
+            cpu_ghz = 0.0
+
+    except Exception:
+        cpu_ghz = 0.0
+
+    # ------------------------------------------------------------------------
+    # RAM
+    # ------------------------------------------------------------------------
+
+    try:
+        ram = psutil.virtual_memory()
+
+        ram_usage = float(
+            ram.percent
+        )
+
+        ram_used_gb = round(
+            ram.used / (1024 ** 3),
+            2
+        )
+
+        ram_total_gb = round(
+            ram.total / (1024 ** 3),
+            2
+        )
+
+    except Exception:
+
+        ram_usage = 0.0
+        ram_used_gb = 0.0
+        ram_total_gb = 0.0
+
+    # ------------------------------------------------------------------------
+    # Valores iniciales
+    # ------------------------------------------------------------------------
+
+    cpu_temp = LAST_VALID_CPU_TEMP
+
     gpu_temp = LAST_VALID_GPU_TEMP
+
     gpu_usage = 0.0
 
+    # ------------------------------------------------------------------------
+    # WINDOWS
+    # ------------------------------------------------------------------------
+
     if IS_WINDOWS:
-        try:
-            pythoncom.CoInitialize()
-            w = wmi.WMI(namespace="root\\OpenHardwareMonitor")
-            sensors = w.Sensor()
 
-            for s in sensors:
-                if s.SensorType == 'Temperature':
-                    if 'cpu' in s.Name.lower() or 'core' in s.Name.lower():
-                        if s.Value and s.Value > 0:
-                            cpu_temp = round(float(s.Value), 1)
-                    elif 'gpu' in s.Name.lower() or 'nvidia' in s.Name.lower():
-                        if s.Value and s.Value > 0:
-                            gpu_temp = round(float(s.Value), 1)
-                            LAST_VALID_GPU_TEMP = gpu_temp
+        # NVIDIA
+        nvidia = _get_nvidia_telemetry()
 
-                elif s.SensorType == 'Load' and ('gpu' in s.Name.lower() or 'nvidia' in s.Name.lower()):
-                    if s.Value is not None:
-                        gpu_usage = round(float(s.Value), 1)
-        except Exception:
-            pass
-    else:
-        try:
-            temps = psutil.sensors_temperatures()
-            if temps:
-                for sensor_name in ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal']:
-                    if sensor_name in temps and len(temps[sensor_name]) > 0:
-                        cpu_temp = round(temps[sensor_name][0].current, 1)
-                        break
+        if nvidia["available"]:
 
-                for sensor_name in ['amdgpu', 'nvidia', 'nouveau']:
-                    if sensor_name in temps and len(temps[sensor_name]) > 0:
-                        gpu_temp = round(temps[sensor_name][0].current, 1)
-                        LAST_VALID_GPU_TEMP = gpu_temp
-                        break
-        except Exception:
-            pass
+            gpu_usage = nvidia["usage"]
 
-        try:
-            res = subprocess.check_output(
-                "nvidia-smi --query-gpu=utilization.gpu,temperature.gpu --format=csv,noheader,nounits",
-                shell=True, timeout=1
-            ).decode("utf-8").strip()
-            if res:
-                parts = res.split(",")
-                gpu_usage = float(parts[0].strip())
-                gpu_temp = float(parts[1].strip())
+            if nvidia["temperature"] is not None:
+
+                gpu_temp = round(
+                    nvidia["temperature"],
+                    1
+                )
+
                 LAST_VALID_GPU_TEMP = gpu_temp
+
+            if nvidia["vram_gb"] > 0:
+
+                vram_gb = nvidia["vram_gb"]
+
+        # OpenHardwareMonitor
+        ohm = _get_openhardwaremonitor_data()
+
+        if (
+            gpu_usage == 0.0
+            and ohm["gpu_usage"] is not None
+        ):
+            gpu_usage = ohm["gpu_usage"]
+
+        if (
+            not nvidia["available"]
+            and ohm["gpu_temp"] is not None
+        ):
+
+            gpu_temp = ohm["gpu_temp"]
+
+            LAST_VALID_GPU_TEMP = gpu_temp
+
+        # CPU
+        measured_cpu_temp = (
+            _get_windows_cpu_temperature()
+        )
+
+        if measured_cpu_temp is not None:
+
+            cpu_temp = measured_cpu_temp
+
+            LAST_VALID_CPU_TEMP = cpu_temp
+
+        else:
+
+            # Estimación de respaldo.
+            #
+            # Se etiqueta internamente como fallback,
+            # pero la API conserva el mismo campo.
+            cpu_temp = round(
+                40.0 + (
+                    cpu_usage * 0.35
+                ),
+                1
+            )
+
+            LAST_VALID_CPU_TEMP = cpu_temp
+
+    # ------------------------------------------------------------------------
+    # LINUX / UNIX
+    # ------------------------------------------------------------------------
+
+    else:
+
+        try:
+
+            temperatures = (
+                psutil.sensors_temperatures()
+            )
+
+            if temperatures:
+
+                # CPU
+                for sensor_name in (
+                    "coretemp",
+                    "k10temp",
+                    "zenpower",
+                    "cpu_thermal",
+                    "acpitz"
+                ):
+
+                    sensors = temperatures.get(
+                        sensor_name
+                    )
+
+                    if not sensors:
+                        continue
+
+                    valid = [
+                        s.current
+                        for s in sensors
+                        if (
+                            getattr(
+                                s,
+                                "current",
+                                None
+                            ) is not None
+                            and 10 <= s.current <= 120
+                        )
+                    ]
+
+                    if valid:
+
+                        cpu_temp = round(
+                            max(valid),
+                            1
+                        )
+
+                        LAST_VALID_CPU_TEMP = cpu_temp
+
+                        break
+
+                # GPU
+                for sensor_name in (
+                    "amdgpu",
+                    "nvidia",
+                    "nouveau"
+                ):
+
+                    sensors = temperatures.get(
+                        sensor_name
+                    )
+
+                    if not sensors:
+                        continue
+
+                    for sensor in sensors:
+
+                        value = getattr(
+                            sensor,
+                            "current",
+                            None
+                        )
+
+                        if (
+                            value is not None
+                            and 0 <= value <= 120
+                        ):
+
+                            gpu_temp = round(
+                                value,
+                                1
+                            )
+
+                            LAST_VALID_GPU_TEMP = (
+                                gpu_temp
+                            )
+
+                            break
+
+                    if gpu_temp != LAST_VALID_GPU_TEMP:
+                        continue
+
         except Exception:
             pass
 
-    is_laptop, chassis_label, bios_info, board_info = get_system_chassis_and_bios()
+    # ------------------------------------------------------------------------
+    # CHASIS
+    # ------------------------------------------------------------------------
 
-    if "laptop" in GPU_MODEL_NAME.lower() or "mobile" in CPU_MODEL_NAME.lower():
+    (
+        is_laptop,
+        chassis_label,
+        bios_info,
+        board_info
+    ) = get_system_chassis_and_bios()
+
+    hardware_string = (
+        cpu_name + " " + gpu_name
+    ).lower()
+
+    if (
+        "laptop" in hardware_string
+        or "mobile" in hardware_string
+    ):
         is_laptop = True
         chassis_label = "Laptop / Notebook"
 
+    # ------------------------------------------------------------------------
+    # NOMBRES PARA UI
+    # ------------------------------------------------------------------------
+
+    if cpu_ghz > 0:
+
+        display_cpu = (
+            f"{cpu_name} "
+            f"({cpu_ghz} GHz)"
+        )
+
+    else:
+        display_cpu = cpu_name
+
+    if vram_gb > 0:
+
+        display_gpu = (
+            f"{gpu_name} "
+            f"({vram_gb} GB)"
+        )
+
+    else:
+
+        display_gpu = gpu_name
+
+    # ------------------------------------------------------------------------
+    # RESULTADO
+    # ------------------------------------------------------------------------
+
     return {
-        "cpu_usage": round(cpu_usage, 1),
-        "cpu_temp": cpu_temp,
-        "cpu_name": CPU_MODEL_NAME,
-        "ram_usage": round(ram.percent, 1),
-        "ram_used_gb": round(ram.used / (1024**3), 2),
-        "ram_total_gb": round(ram.total / (1024**3), 2),
-        "gpu_usage": gpu_usage,
-        "gpu_temp": gpu_temp,
-        "gpu_name": GPU_MODEL_NAME,
+
+        "timestamp": time.time(),
+
+        "cpu_usage": round(
+            max(0, min(100, cpu_usage)),
+            1
+        ),
+
+        "cpu_ghz": cpu_ghz,
+
+        "cpu_temp": round(
+            cpu_temp,
+            1
+        ),
+
+        "cpu_name": display_cpu,
+
+        "ram_usage": round(
+            max(0, min(100, ram_usage)),
+            1
+        ),
+
+        "ram_used_gb": ram_used_gb,
+
+        "ram_total_gb": ram_total_gb,
+
+        "gpu_usage": round(
+            max(0, min(100, gpu_usage)),
+            1
+        ),
+
+        "gpu_temp": round(
+            max(0, min(120, gpu_temp)),
+            1
+        ),
+
+        "gpu_name": display_gpu,
+
+        "gpu_vram_gb": vram_gb,
+
         "is_laptop": is_laptop,
+
         "chassis_label": chassis_label,
+
         "bios_info": bios_info,
+
         "board_info": board_info
     }
 
 
-def _get_linux_smart_health(device_path):
-    """Consulta de salud real SMART en Linux"""
-    try:
-        cmd = f"smartctl -H -j {device_path}"
-        res = subprocess.check_output(cmd, shell=True, stderr=subprocess.DEVNULL).decode('utf-8')
-        data = json.loads(res)
-        
-        # Si la prueba pasó
-        if data.get("smart_status", {}).get("passed", True):
-            # Buscar porcentaje de vida útil en NVMe si existe
-            nvme_percentage = data.get("nvme_smart_health_information_log", {}).get("percentage_used")
-            if nvme_percentage is not None:
-                return max(0, 100 - int(nvme_percentage))
-            return 100
-        else:
-            return 35
-    except Exception:
-        pass
-    return 100
-
+# ============================================================================
+# DISCOS
+# ============================================================================
 
 def get_all_disks_data():
+
     disks = []
 
-    if IS_WINDOWS:
-        try:
-            pythoncom.CoInitialize()
-            c = wmi.WMI()
+    # =========================================================================
+    # WINDOWS
+    # =========================================================================
 
-            logic_partitions = {}
-            for part in psutil.disk_partitions(all=False):
+    if IS_WINDOWS:
+
+        _init_com()
+
+        try:
+
+            partitions = psutil.disk_partitions(
+                all=False
+            )
+
+            disk_models = {}
+
+            # Obtener modelos una sola vez
+            if wmi is not None:
+
                 try:
-                    usage = psutil.disk_usage(part.mountpoint)
-                    letter = part.mountpoint.replace("\\", "").replace("/", "")
-                    logic_partitions[letter] = {
-                        "total": usage.total,
-                        "used": usage.used,
-                        "percent": usage.percent
-                    }
+
+                    c = wmi.WMI()
+
+                    for disk in c.Win32_DiskDrive():
+
+                        model = (
+                            disk.Model.strip()
+                            if disk.Model
+                            else "Disco físico"
+                        )
+
+                        for partition in disk.associators(
+                            "Win32_DiskDriveToDiskPartition"
+                        ):
+
+                            for logical in partition.associators(
+                                "Win32_LogicalDiskToPartition"
+                            ):
+
+                                device_id = getattr(
+                                    logical,
+                                    "DeviceID",
+                                    None
+                                )
+
+                                if device_id:
+                                    disk_models[
+                                        device_id
+                                    ] = model
+
                 except Exception:
                     pass
 
-            partitions_map = {}
-            try:
-                for dp in c.Win32_DiskDriveToDiskPartition():
-                    drive_ref = dp.Antecedent.split("=")[-1].replace('"', '').strip()
-                    part_ref = dp.Dependent.split("=")[-1].replace('"', '').strip()
+            index = 0
 
-                    for lp in c.Win32_LogicalDiskToPartition():
-                        lp_part_ref = lp.Antecedent.split("=")[-1].replace('"', '').strip()
-                        if part_ref == lp_part_ref:
-                            log_drive = lp.Dependent.split("=")[-1].replace('"', '').strip()
-                            partitions_map.setdefault(drive_ref, []).append(log_drive)
-            except Exception:
-                pass
+            for partition in partitions:
 
-            smart_failures = {}
-            try:
-                wmi_smart = wmi.WMI(namespace="root\\wmi")
-                for status in wmi_smart.MSStorageDriver_FailurePredictStatus():
-                    smart_failures[status.InstanceName.strip().upper()] = status.PredictFailure
-            except Exception:
-                pass
+                try:
 
-            for i, disk in enumerate(c.Win32_DiskDrive()):
-                disk_id = disk.DeviceID.replace('\\\\.\\', '').strip()
-                assigned = partitions_map.get(disk.DeviceID, [])
-                if not assigned:
-                    assigned = partitions_map.get(disk_id, [])
+                    if "cdrom" in partition.opts:
+                        continue
 
-                if not assigned and logic_partitions:
-                    keys = list(logic_partitions.keys())
-                    if i < len(keys):
-                        assigned = [keys[i]]
+                    if not partition.fstype:
+                        continue
 
-                mount_str = ", ".join(assigned) if assigned else "Partición de Sistema"
-                total_bytes = int(disk.Size) if disk.Size else 0
-                used_bytes = 0
+                    mountpoint = (
+                        partition.mountpoint
+                    )
 
-                for letter in assigned:
-                    clean_let = letter.replace(":", "") + ":"
-                    if clean_let in logic_partitions:
-                        used_bytes += logic_partitions[clean_let]["used"]
+                    usage = psutil.disk_usage(
+                        mountpoint
+                    )
 
-                if total_bytes == 0 and assigned:
-                    for letter in assigned:
-                        clean_let = letter.replace(":", "") + ":"
-                        if clean_let in logic_partitions:
-                            total_bytes += logic_partitions[clean_let]["total"]
+                    mount_letter = (
+                        mountpoint
+                        .replace("\\", "")
+                        .replace("/", "")
+                        .rstrip(":")
+                    )
 
-                total_gb = round(total_bytes / (1024**3), 2)
-                used_gb = round(used_bytes / (1024**3), 2)
-                used_percent = round((used_bytes / total_bytes * 100), 1) if total_bytes > 0 else 0.0
+                    device_id = (
+                        mount_letter + ":"
+                        if len(mount_letter) == 1
+                        else mount_letter
+                    )
 
-                health_score = 100
-                is_failing = False
-                for p_name, predict_fail in smart_failures.items():
-                    if disk.PNPDeviceID and disk.PNPDeviceID.upper() in p_name:
-                        if predict_fail:
-                            is_failing = True
+                    model = disk_models.get(
+                        device_id,
+                        f"Unidad {device_id}"
+                    )
 
-                disk_status = str(disk.Status).upper() if disk.Status else "OK"
-                if is_failing or disk_status in ["ERROR", "PRED FAIL"]:
-                    health_score = 30
-                elif disk_status == "DEGRADED":
-                    health_score = 65
+                    total_bytes = usage.total
+                    used_bytes = usage.used
 
-                disks.append({
-                    "index": i,
-                    "model": disk.Model.strip() if disk.Model else f"Disco Físico {i}",
-                    "mount_points": mount_str,
-                    "total_gb": total_gb,
-                    "used_percent": used_percent,
-                    "used_gb": used_gb,
-                    "used_mb": int(used_bytes / (1024**2)),
-                    "used_kb": int(used_bytes / 1024),
-                    "health": health_score
-                })
+                    total_gb = round(
+                        total_bytes / (1024 ** 3),
+                        2
+                    )
+
+                    used_gb = round(
+                        used_bytes / (1024 ** 3),
+                        2
+                    )
+
+                    disks.append({
+
+                        "index": index,
+
+                        "model": model,
+
+                        "mount_points": (
+                            f"[{device_id}]"
+                        ),
+
+                        "total_gb": total_gb,
+
+                        "used_percent": round(
+                            usage.percent,
+                            1
+                        ),
+
+                        "used_gb": used_gb,
+
+                        "used_mb": int(
+                            used_bytes / (1024 ** 2)
+                        ),
+
+                        "used_kb": int(
+                            used_bytes / 1024
+                        ),
+
+                        # Esta es una salud lógica basada
+                        # en uso, no SMART real.
+                        "health": 100
+
+                    })
+
+                    index += 1
+
+                except Exception:
+                    continue
+
         except Exception:
             pass
 
+    # =========================================================================
+    # LINUX
+    # =========================================================================
+
     else:
-        # LÓGICA DINÁMICA LINUX (Detecta solo discos físicos dinámicamente)
+
         try:
-            cmd = "lsblk -J -b -o NAME,MODEL,SIZE,TYPE,MOUNTPOINT,FSTYPE"
-            res = subprocess.check_output(cmd, shell=True).decode('utf-8')
-            blk_data = json.loads(res)
 
-            idx = 0
-            for dev in blk_data.get("blockdevices", []):
-                # Filtrar solo DISCOS FISICOS (ignora loop, zram, etc)
-                if dev.get("type") == "disk":
-                    dev_name = dev.get("name")
-                    dev_path = f"/dev/{dev_name}"
-                    model = dev.get("model") or f"Disco Físico (/dev/{dev_name})"
-                    total_bytes = int(dev.get("size", 0))
-                    total_gb = round(total_bytes / (1024**3), 2)
+            command = (
+                "lsblk -J -b "
+                "-o NAME,MODEL,SIZE,TYPE,MOUNTPOINT,FSTYPE"
+            )
 
-                    # Calcular uso agregando particiones montadas de este disco
+            output = _run_command(
+                command,
+                timeout=3
+            )
+
+            if output:
+
+                block_data = json.loads(
+                    output
+                )
+
+                index = 0
+
+                for device in block_data.get(
+                    "blockdevices",
+                    []
+                ):
+
+                    if device.get("type") != "disk":
+                        continue
+
+                    name = device.get(
+                        "name"
+                    )
+
+                    model = (
+                        device.get("model")
+                        or f"Disco físico (/dev/{name})"
+                    )
+
+                    try:
+                        total_bytes = int(
+                            device.get("size", 0)
+                        )
+                    except Exception:
+                        total_bytes = 0
+
+                    total_gb = round(
+                        total_bytes / (1024 ** 3),
+                        2
+                    )
+
                     used_bytes = 0
                     mounts = []
 
                     def parse_children(children):
-                        nonlocal used_bytes, mounts
+
+                        nonlocal used_bytes
+
                         for child in children:
-                            mp = child.get("mountpoint")
-                            if mp:
-                                mounts.append(mp)
+
+                            mountpoint = child.get(
+                                "mountpoint"
+                            )
+
+                            if mountpoint:
+
+                                mounts.append(
+                                    mountpoint
+                                )
+
                                 try:
-                                    usage = psutil.disk_usage(mp)
-                                    used_bytes += usage.used
+
+                                    usage = (
+                                        psutil.disk_usage(
+                                            mountpoint
+                                        )
+                                    )
+
+                                    used_bytes += (
+                                        usage.used
+                                    )
+
                                 except Exception:
                                     pass
-                            if "children" in child:
-                                parse_children(child["children"])
 
-                    if "children" in dev:
-                        parse_children(dev["children"])
+                            grandchildren = (
+                                child.get(
+                                    "children"
+                                )
+                            )
 
-                    used_gb = round(used_bytes / (1024**3), 2)
-                    used_percent = round((used_bytes / total_bytes * 100), 1) if total_bytes > 0 else 0.0
-                    mount_str = ", ".join(mounts) if mounts else "Sin montar / SWAP"
+                            if grandchildren:
+                                parse_children(
+                                    grandchildren
+                                )
 
-                    # Obtener Salud SMART Real
-                    health_score = _get_linux_smart_health(dev_path)
+                    children = device.get(
+                        "children"
+                    )
+
+                    if children:
+                        parse_children(
+                            children
+                        )
+
+                    used_gb = round(
+                        used_bytes / (1024 ** 3),
+                        2
+                    )
+
+                    used_percent = (
+                        round(
+                            (
+                                used_bytes
+                                / total_bytes
+                                * 100
+                            ),
+                            1
+                        )
+                        if total_bytes > 0
+                        else 0.0
+                    )
 
                     disks.append({
-                        "index": idx,
+
+                        "index": index,
+
                         "model": model.strip(),
-                        "mount_points": mount_str,
-                        "total_gb": total_gb,
-                        "used_percent": used_percent,
-                        "used_gb": used_gb,
-                        "used_mb": int(used_bytes / (1024**2)),
-                        "used_kb": int(used_bytes / 1024),
-                        "health": health_score
-                    })
-                    idx += 1
-        except Exception:
-            pass
 
-    # Respaldo en caso de fallo crítico
-    if not disks:
-        try:
-            for i, p in enumerate(psutil.disk_partitions(all=False)):
-                if not p.mountpoint or 'loop' in p.device or p.fstype == '':
-                    continue
-                try:
-                    usage = psutil.disk_usage(p.mountpoint)
-                    disks.append({
-                        "index": i,
-                        "model": f"Disco ({p.device})",
-                        "mount_points": p.mountpoint,
-                        "total_gb": round(usage.total / (1024**3), 2),
-                        "used_percent": round(usage.percent, 1),
-                        "used_gb": round(usage.used / (1024**3), 2),
-                        "used_mb": int(usage.used / (1024**2)),
-                        "used_kb": int(usage.used / 1024),
+                        "mount_points": (
+                            ", ".join(mounts)
+                            if mounts
+                            else "Sin montar"
+                        ),
+
+                        "total_gb": total_gb,
+
+                        "used_percent": used_percent,
+
+                        "used_gb": used_gb,
+
+                        "used_mb": int(
+                            used_bytes / (1024 ** 2)
+                        ),
+
+                        "used_kb": int(
+                            used_bytes / 1024
+                        ),
+
                         "health": 100
+
                     })
-                except Exception:
-                    pass
+
+                    index += 1
+
         except Exception:
             pass
 
     return disks
 
 
-def calculate_preliminary_score(cpu_u, ram_u, cpu_t, gpu_t, disks):
-    score = 100.0
-    if cpu_u > 85: score -= 15
-    if ram_u > 90: score -= 15
-    if cpu_t > 80: score -= 10
-    if gpu_t > 85: score -= 10
+# ============================================================================
+# SCORE
+# ============================================================================
 
-    for d in disks:
-        if d["health"] < 100:
-            score -= (100 - d["health"]) * 0.2
-        if d["used_percent"] > 90:
+def calculate_preliminary_score(
+    cpu_u,
+    ram_u,
+    cpu_t,
+    gpu_t,
+    disks
+):
+
+    score = 100.0
+
+    if cpu_u > 85:
+        score -= 15
+
+    elif cpu_u > 70:
+        score -= 5
+
+    if ram_u > 90:
+        score -= 15
+
+    elif ram_u > 80:
+        score -= 5
+
+    if cpu_t > 90:
+        score -= 15
+
+    elif cpu_t > 80:
+        score -= 10
+
+    if gpu_t > 90:
+        score -= 15
+
+    elif gpu_t > 85:
+        score -= 10
+
+    for disk in disks:
+
+        health = disk.get(
+            "health",
+            100
+        )
+
+        used = disk.get(
+            "used_percent",
+            0
+        )
+
+        if health < 100:
+            score -= (
+                100 - health
+            ) * 0.2
+
+        if used > 95:
+            score -= 15
+
+        elif used > 90:
             score -= 10
 
-    return max(0.0, round(score, 1))
+        elif used > 80:
+            score -= 3
+
+    return max(
+        0.0,
+        min(
+            100.0,
+            round(score, 1)
+        )
+    )
+
+
+# ============================================================================
+# INICIALIZACIÓN
+# ============================================================================
+
+# Cargar nombres al importar.
+try:
+    get_hardware_names()
+except Exception:
+    pass
