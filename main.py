@@ -2,12 +2,23 @@ import customtkinter as ctk
 import threading
 import time
 import psutil
-import pythoncom
 import os
+import platform
 from collections import deque
 from tkinter import messagebox, filedialog
 from datetime import datetime
 from PIL import Image
+
+# Detectar el sistema operativo para mantener compatibilidad
+IS_WINDOWS = platform.system() == "Windows"
+
+if IS_WINDOWS:
+    try:
+        import pythoncom
+    except ImportError:
+        pythoncom = None
+else:
+    pythoncom = None
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -59,10 +70,10 @@ class DuplicateScannerWindow(ctk.CTkToplevel):
 
         ctk.CTkLabel(frame_top, text="Carpeta:", font=("Segoe UI", 11, "bold")).pack(side="left", padx=10, pady=10)
 
-        # Ruta por defecto automática (Carpeta Descargas del usuario)
+        # Ruta por defecto automática según OS
         default_folder = os.path.expanduser("~/Downloads")
         self.entry_path = ctk.CTkEntry(frame_top, font=("Segoe UI", 10))
-        self.entry_path.insert(0, default_folder if os.path.exists(default_folder) else "C:\\")
+        self.entry_path.insert(0, default_folder if os.path.exists(default_folder) else ("C:\\" if IS_WINDOWS else "/"))
         self.entry_path.pack(side="left", fill="x", expand=True, padx=5, pady=10)
 
         btn_browse = ctk.CTkButton(frame_top, text="📁 Buscar", width=80, fg_color="#3b82f6", hover_color="#2563eb", command=self.browse_folder)
@@ -83,7 +94,9 @@ class DuplicateScannerWindow(ctk.CTkToplevel):
         btn_preset_docs = ctk.CTkButton(frame_actions, text="📄 Documentos", width=95, height=26, fg_color="#1e293b", hover_color="#334155", command=lambda: self.set_preset_path(os.path.expanduser("~/Documents")))
         btn_preset_docs.pack(side="left", padx=3)
 
-        btn_preset_c = ctk.CTkButton(frame_actions, text="💾 Disco C:", width=80, height=26, fg_color="#1e293b", hover_color="#334155", command=lambda: self.set_preset_path("C:\\"))
+        root_label = "💾 Disco C:" if IS_WINDOWS else "💾 Raíz /"
+        root_path = "C:\\" if IS_WINDOWS else "/"
+        btn_preset_c = ctk.CTkButton(frame_actions, text=root_label, width=80, height=26, fg_color="#1e293b", hover_color="#334155", command=lambda: self.set_preset_path(root_path))
         btn_preset_c.pack(side="left", padx=3)
 
         self.btn_auto_select = ctk.CTkButton(frame_actions, text="⚡ Auto-Seleccionar Copias", width=160, height=26, fg_color="#8b5cf6", hover_color="#7c3aed", state="disabled", command=self.auto_select_duplicates)
@@ -145,12 +158,10 @@ class DuplicateScannerWindow(ctk.CTkToplevel):
         self.after(0, self._render_results, duplicates)
 
     def _update_status_safe(self, text):
-        """Verifica que la ventana siga abierta antes de actualizar el texto de estado."""
         if self.winfo_exists():
             self.after(0, lambda: self.lbl_status.configure(text=text) if self.winfo_exists() else None)
 
     def _render_results(self, duplicates):
-        """Previene renderizar si la ventana fue cerrada durante el escaneo."""
         if not self.winfo_exists():
             return
 
@@ -201,7 +212,6 @@ class DuplicateScannerWindow(ctk.CTkToplevel):
                 }
 
     def auto_select_duplicates(self):
-        """Marca automáticamente todas las copias secundarias conservando el primer archivo."""
         selected_count = 0
         for item in self.checkboxes_map.values():
             if not item["is_original"]:
@@ -212,7 +222,6 @@ class DuplicateScannerWindow(ctk.CTkToplevel):
         messagebox.showinfo("Auto-Selección", f"Se seleccionaron automáticamente {selected_count} copias duplicadas para eliminar (manteniendo las versiones originales).", parent=self)
 
     def delete_selected_batch(self):
-        """Elimina todos los archivos cuyas casillas estén marcadas."""
         to_delete = [path for path, item in self.checkboxes_map.items() if item["var"].get()]
         
         if not to_delete:
@@ -474,6 +483,9 @@ class App(ctk.CTk):
 
         self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame_charts)
         self.canvas.get_tk_widget().pack(fill="both", expand=True, padx=8, pady=6)
+        
+        # Inicialización del renderizado para evitar que self.background se quede en None
+        self.canvas.draw()
 
         self.background = None
         self.canvas.mpl_connect("draw_event", self.on_draw)
@@ -487,7 +499,6 @@ class App(ctk.CTk):
         self.update_charts_fast()
 
     def open_duplicate_scanner(self):
-        """Abre la ventana dedicada al escáner de duplicados trayéndola al frente."""
         if self.duplicate_window is None or not self.duplicate_window.winfo_exists():
             self.duplicate_window = DuplicateScannerWindow(master=self)
         else:
@@ -666,7 +677,9 @@ class App(ctk.CTk):
             w["bar"].set(d["used_percent"] / 100.0)
 
     def telemetry_loop(self):
-        pythoncom.CoInitialize()
+        if IS_WINDOWS and pythoncom:
+            pythoncom.CoInitialize()
+
         psutil.cpu_percent(interval=None)
 
         disk_timer = 0

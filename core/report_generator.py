@@ -1,4 +1,4 @@
-﻿import os
+import os
 import random
 from datetime import datetime
 from reportlab.lib.pagesizes import letter
@@ -15,9 +15,6 @@ HARDWARE_TIPS = [
 ]
 
 def get_maintenance_recommendations(telemetry_data, disks_data):
-    """
-    Genera recomendaciones personalizadas diferenciando si el equipo es Laptop o Torre.
-    """
     recommendations = []
     
     is_laptop = telemetry_data.get('is_laptop', False)
@@ -26,12 +23,11 @@ def get_maintenance_recommendations(telemetry_data, disks_data):
     cpu_temp = telemetry_data.get('cpu_temp', 0)
     gpu_temp = telemetry_data.get('gpu_temp', 0)
 
-    # 1. Mantenimiento CPU & Pasta Térmica (Diferenciado por Laptop vs Torre)
     if cpu_temp > 70 or "INTEL" in cpu_name or "RYZEN" in cpu_name:
         if is_laptop:
             recommendations.append({
                 "component": f"Procesador Laptop ({telemetry_data.get('cpu_name', 'CPU')})",
-                "action": "Limpieza de Modulo Térmico y Repaste en Portátil",
+                "action": "Limpieza de Módulo Térmico y Repaste en Portátil",
                 "steps": "1. Desconectar cargador y retirar tapa trasera. 2. ¡DESCONECTAR BATERÍA INTERNA! 3. Retirar heatsink/heatpipes de cobre. 4. Limpiar con isopropílico y aplicar pasta de alta viscosidad (Honeywell PTM7950 o Noctua NT-H2).",
                 "supplies": "Destornilladores de precisión (PH00/Torx), Púa de plástico (Spudger), Alcohol Isopropílico 99%, Pasta térmica densa.",
                 "link": "https://www.youtube.com/results?search_query=como+limpiar+y+cambiar+pasta+termica+laptop+gaming"
@@ -45,7 +41,6 @@ def get_maintenance_recommendations(telemetry_data, disks_data):
                 "link": "https://www.youtube.com/results?search_query=como+cambiar+pasta+termica+pc+escritorio"
             })
 
-    # 2. Mantenimiento GPU
     if gpu_temp > 75:
         if is_laptop:
             recommendations.append({
@@ -64,7 +59,6 @@ def get_maintenance_recommendations(telemetry_data, disks_data):
                 "link": "https://www.youtube.com/results?search_query=mantenimiento+termico+gpu+desktop"
             })
 
-    # 3. Almacenamiento
     for d in disks_data:
         model = d.get('model', '').upper()
         health = d.get('health', 100)
@@ -75,7 +69,7 @@ def get_maintenance_recommendations(telemetry_data, disks_data):
                 recommendations.append({
                     "component": f"SSD / NVMe: {d.get('model', 'Unidad SSD')}",
                     "action": "Optimización TRIM y Gestión Térmica M.2",
-                    "steps": "1. Ejecutar 'Optimizar Unidades' en Windows. 2. Si es Laptop, verificar pad térmico contra tapa metálica. En Torre, instalar disipador pasivo de aluminio.",
+                    "steps": "1. Ejecutar 'Optimizar Unidades' en Windows/Linux. 2. Si es Laptop, verificar pad térmico contra tapa metálica. En Torre, instalar disipador pasivo de aluminio.",
                     "supplies": "Disipador M.2 de perfil bajo (Laptop) / Disipador de cobre con aletas (Torre).",
                     "link": "https://www.youtube.com/results?search_query=instalar+disipador+m2+nvme"
                 })
@@ -111,6 +105,12 @@ def generate_pdf_report(telemetry_data, disks_data, health_score, output_path=No
     body_style = ParagraphStyle(
         'Body_Custom', parent=styles['Normal'], fontName='Helvetica', fontSize=8, textColor=colors.HexColor("#334155"), spaceAfter=2
     )
+    cell_style = ParagraphStyle(
+        'Cell_Custom', parent=styles['Normal'], fontName='Helvetica', fontSize=8, leading=10, textColor=colors.HexColor("#0f172a")
+    )
+    header_style = ParagraphStyle(
+        'Header_Custom', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=8, textColor=colors.whitesmoke
+    )
     tip_style = ParagraphStyle(
         'Tip_Custom', parent=styles['Normal'], fontName='Helvetica-Oblique', fontSize=8, textColor=colors.HexColor("#1e293b")
     )
@@ -120,7 +120,6 @@ def generate_pdf_report(telemetry_data, disks_data, health_score, output_path=No
 
     elements = []
 
-    # Encabezado con detección de Tipo de Equipo, BIOS y Placa Base
     now_str = datetime.now().strftime("%d/%m/%Y %H:%M:%S")
     elements.append(Paragraph("⚡ DiagnosticPC - Informe de Diagnóstico Hardware", title_style))
     elements.append(Paragraph("Predictive Analytics Engine & Hardware Telemetry System", subtitle_style))
@@ -135,58 +134,81 @@ def generate_pdf_report(telemetry_data, disks_data, health_score, output_path=No
     elements.append(Paragraph(info_header, body_style))
     elements.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#cbd5e1"), spaceBefore=6, spaceAfter=8))
 
-    # Tabla Diagnóstico
     elements.append(Paragraph("1. Resumen de Componentes Clave", h2_style))
+    
     table_data = [
-        ["Componente", "Modelo Detectado", "Uso / Estado", "Temperatura / Capacidad"],
-        ["CPU", telemetry_data.get('cpu_name', 'Procesador'), f"{telemetry_data.get('cpu_usage', 0)} %", f"{telemetry_data.get('cpu_temp', '--')} °C"],
-        ["RAM", "Memoria del Sistema", f"{telemetry_data.get('ram_usage', 0)} %", f"{telemetry_data.get('ram_used_gb', 0)} GB / {telemetry_data.get('ram_total_gb', 0)} GB"],
-        ["GPU", telemetry_data.get('gpu_name', 'Tarjeta Gráfica'), f"{telemetry_data.get('gpu_usage', 0)} %", f"{telemetry_data.get('gpu_temp', '--')} °C"]
+        [
+            Paragraph("Componente", header_style),
+            Paragraph("Modelo Detectado", header_style),
+            Paragraph("Uso / Estado", header_style),
+            Paragraph("Temperatura / Capacidad", header_style)
+        ],
+        [
+            Paragraph("CPU", cell_style),
+            Paragraph(str(telemetry_data.get('cpu_name', 'Procesador')), cell_style),
+            Paragraph(f"{telemetry_data.get('cpu_usage', 0)} %", cell_style),
+            Paragraph(f"{telemetry_data.get('cpu_temp', '--')} °C", cell_style)
+        ],
+        [
+            Paragraph("RAM", cell_style),
+            Paragraph("Memoria del Sistema", cell_style),
+            Paragraph(f"{telemetry_data.get('ram_usage', 0)} %", cell_style),
+            Paragraph(f"{telemetry_data.get('ram_used_gb', 0)} GB / {telemetry_data.get('ram_total_gb', 0)} GB", cell_style)
+        ],
+        [
+            Paragraph("GPU", cell_style),
+            Paragraph(str(telemetry_data.get('gpu_name', 'Tarjeta Gráfica')), cell_style),
+            Paragraph(f"{telemetry_data.get('gpu_usage', 0)} %", cell_style),
+            Paragraph(f"{telemetry_data.get('gpu_temp', '--')} °C", cell_style)
+        ]
     ]
 
-    t = Table(table_data, colWidths=[60, 220, 100, 160])
+    # Distribución equilibrada del ancho total (540 pt)
+    t = Table(table_data, colWidths=[65, 260, 85, 130])
     t.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#0f172a')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 8),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e1')),
         ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#f8fafc')),
-        ('FONTSIZE', (0, 1), (-1, -1), 8),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
     ]))
     elements.append(t)
     elements.append(Spacer(1, 8))
 
-    # Tabla Almacenamiento
     elements.append(Paragraph("2. Salud y Espacio de Almacenamiento (S.M.A.R.T.)", h2_style))
-    disk_rows = [["Unidad", "Modelo / Letra(s)", "Salud S.M.A.R.T.", "Espacio Ocupado"]]
+    disk_rows = [[
+        Paragraph("Unidad", header_style),
+        Paragraph("Modelo / Punto de Montaje", header_style),
+        Paragraph("Salud S.M.A.R.T.", header_style),
+        Paragraph("Espacio Ocupado", header_style)
+    ]]
 
     for d in disks_data:
         disk_rows.append([
-            f"Disco {d.get('index', 0)}",
-            f"{d.get('model', 'N/A')} [{d.get('mount_points', '')}]",
-            f"{d.get('health', 0)}%",
-            f"{d.get('used_gb', 0)} GB / {d.get('total_gb', 0)} GB ({d.get('used_percent', 0)}%)"
+            Paragraph(f"Disco {d.get('index', 0)}", cell_style),
+            Paragraph(f"{d.get('model', 'N/A')} [{d.get('mount_points', '')}]", cell_style),
+            Paragraph(f"{d.get('health', 0)}%", cell_style),
+            Paragraph(f"{d.get('used_gb', 0)} GB / {d.get('total_gb', 0)} GB ({d.get('used_percent', 0)}%)", cell_style)
         ])
 
-    t_disks = Table(disk_rows, colWidths=[55, 225, 100, 160])
+    t_disks = Table(disk_rows, colWidths=[65, 245, 100, 130])
     t_disks.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1e293b')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 8),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e1')),
         ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#ffffff')),
-        ('FONTSIZE', (0, 1), (-1, -1), 8),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
     ]))
     elements.append(t_disks)
     elements.append(Spacer(1, 8))
 
-    # Matriz Mantenimiento
     elements.append(Paragraph(f"3. Plan de Mantenimiento Adaptado ({telemetry_data.get('chassis_label', 'Equipo')})", h2_style))
     recs = get_maintenance_recommendations(telemetry_data, disks_data)
 
-    rec_table_data = [["Componente", "Acción Recomendada", "Pasos a Seguir e Insumos Sugeridos", "Guía"]]
+    rec_table_data = [[
+        Paragraph("Componente", header_style),
+        Paragraph("Acción Recomendada", header_style),
+        Paragraph("Pasos a Seguir e Insumos Sugeridos", header_style),
+        Paragraph("Guía", header_style)
+    ]]
     for r in recs:
         steps_text = f"<b>Pasos:</b> {r['steps']}<br/><b>Insumos:</b> {r['supplies']}"
         link_p = Paragraph(f"<a href='{r['link']}'><u>Ver Tutorial</u></a>", link_style)
@@ -201,9 +223,6 @@ def generate_pdf_report(telemetry_data, disks_data, health_score, output_path=No
     t_recs = Table(rec_table_data, colWidths=[100, 110, 250, 80])
     t_recs.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#2563eb')),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 8),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e1')),
         ('BACKGROUND', (0, 1), (-1, -1), colors.HexColor('#f8fafc')),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
@@ -211,7 +230,6 @@ def generate_pdf_report(telemetry_data, disks_data, health_score, output_path=No
     elements.append(t_recs)
     elements.append(Spacer(1, 8))
 
-    # Tip del Día
     elements.append(Paragraph("💡 ¿Sabías que...?", h2_style))
     tip_selected = random.choice(HARDWARE_TIPS)
     t_tip = Table([[Paragraph(f"<i>“{tip_selected}”</i>", tip_style)]], colWidths=[540])

@@ -1,18 +1,28 @@
 import os
 import shutil
 import tempfile
-import ctypes
+import platform
 import subprocess
 import hashlib
 import psutil
 
+IS_WINDOWS = platform.system() == "Windows"
+
+if IS_WINDOWS:
+    import ctypes
+
 def get_temp_directories():
-    """Retorna las rutas de las carpetas temporales de Windows."""
-    temp_dirs = [
-        tempfile.gettempdir(),  # C:\Users\<User>\AppData\Local\Temp
-        os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), 'Temp')
-    ]
-    return [d for d in temp_dirs if os.path.exists(d)]
+    """Retorna las rutas de carpetas temporales para Windows o Linux."""
+    temp_dirs = [tempfile.gettempdir()]
+    if IS_WINDOWS:
+        win_temp = os.path.join(os.environ.get('SystemRoot', 'C:\\Windows'), 'Temp')
+        if os.path.exists(win_temp):
+            temp_dirs.append(win_temp)
+    else:  # Linux
+        for extra in ['/var/tmp', '/tmp']:
+            if os.path.exists(extra):
+                temp_dirs.append(extra)
+    return list(set(temp_dirs))
 
 def calculate_cleanable_space_mb():
     """Calcula el espacio total estimado en MB que se puede liberar."""
@@ -29,10 +39,7 @@ def calculate_cleanable_space_mb():
     return round(total_bytes / (1024**2), 2)
 
 def clean_temp_files():
-    """
-    Elimina archivos temporales acumulados. 
-    Omite automáticamente aquellos archivos que estén en uso por procesos activos.
-    """
+    """Elimina archivos temporales omitiendo los que estén en uso."""
     freed_bytes = 0
     deleted_files_count = 0
     
@@ -46,7 +53,7 @@ def clean_temp_files():
                     freed_bytes += size
                     deleted_files_count += 1
                 except Exception:
-                    pass  # Archivo en uso por el sistema o protegido
+                    pass
             for d in dirs:
                 try:
                     os.rmdir(os.path.join(root, d))
@@ -59,53 +66,61 @@ def clean_temp_files():
     }
 
 def empty_recycle_bin():
-    """Vacía la Papelera de Reciclaje de Windows de forma silenciosa mediante WinAPI."""
+    """Vacía la papelera de reciclaje según el sistema operativo."""
     try:
-        flags = 7  # Sin confirmación, sin barra de progreso y sin sonido
-        result = ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, flags)
-        return result == 0
+        if IS_WINDOWS:
+            flags = 7  # SILENT | NOPROGRESSBAR | NOCONFIRMATION
+            result = ctypes.windll.shell32.SHEmptyRecycleBinW(None, None, flags)
+            return result == 0
+        else:  # Linux (XDG Trash Standard)
+            trash_path = os.path.expanduser('~/.local/share/Trash/files')
+            if os.path.exists(trash_path):
+                for item in os.listdir(trash_path):
+                    p = os.path.join(trash_path, item)
+                    if os.path.isdir(p):
+                        shutil.rmtree(p)
+                    else:
+                        os.remove(p)
+            return True
     except Exception:
         return False
 
 def flush_dns_cache():
-    """Ejecuta el vaciado de la caché DNS del sistema sin mostrar consola."""
+    """Vacía la caché DNS del sistema."""
     try:
-        subprocess.run(["ipconfig", "/flushdns"], capture_output=True, check=True, creationflags=0x08000000)
+        if IS_WINDOWS:
+            subprocess.run(["ipconfig", "/flushdns"], capture_output=True, check=True, creationflags=0x08000000)
+        else:  # Linux (resolvectl o systemd-resolve)
+            try:
+                subprocess.run(["resolvectl", "flush-caches"], check=True)
+            except Exception:
+                subprocess.run(["systemd-resolve", "--flush-caches"], check=True)
         return True
     except Exception:
         return False
 
 def optimize_ram_memory():
-    """
-    Limpieza profunda de RAM estilo Mem Reduct.
-    Recorre todos los procesos activos y vacía sus Working Sets, además de purgar la Standby List.
-    """
-    cleaned_processes = 0
-
-    for proc in psutil.process_iter(['pid']):
-        try:
-            pid = proc.info['pid']
-            if pid == 0:
+    """Optimiza el uso de memoria en Windows o Linux."""
+    if IS_WINDOWS:
+        for proc in psutil.process_iter(['pid']):
+            try:
+                pid = proc.info['pid']
+                if pid == 0: continue
+                handle = ctypes.windll.kernel32.OpenProcess(0x0500, False, pid)
+                if handle:
+                    ctypes.windll.psapi.EmptyWorkingSet(handle)
+                    ctypes.windll.kernel32.CloseHandle(handle)
+            except Exception:
                 continue
-            
-            handle = ctypes.windll.kernel32.OpenProcess(0x0500, False, pid)
-            if handle:
-                if ctypes.windll.psapi.EmptyWorkingSet(handle):
-                    cleaned_processes += 1
-                ctypes.windll.kernel32.CloseHandle(handle)
+    else:  # Linux: forzar escritura en disco para liberar buffers
+        try:
+            subprocess.run(["sync"], check=True)
         except Exception:
-            continue
-
-    try:
-        command = ctypes.c_ulong(3)  # MemoryPurgeStandbyList
-        ctypes.windll.ntdll.NtSetSystemInformation(80, ctypes.byref(command), ctypes.sizeof(command))
-    except Exception:
-        pass
-
+            pass
     return True
 
 def calculate_file_hash(file_path, chunk_size=65536):
-    """Calcula el hash MD5 de un archivo por bloques para optimizar el uso de RAM."""
+    """Calcula hash MD5 por partes para no saturar memoria RAM."""
     hasher = hashlib.md5()
     try:
         with open(file_path, 'rb') as f:
@@ -116,31 +131,23 @@ def calculate_file_hash(file_path, chunk_size=65536):
         return None
 
 def find_duplicate_files(target_dir, status_callback=None):
-    """
-    Escanea un directorio buscando duplicados exactos mediante 2 fases:
-    1. Agrupa por tamaño exacto de archivo.
-    2. Calcula hash MD5 únicamente a los archivos que comparten tamaño.
-    """
+    """Búsqueda de archivos duplicados de doble fase (tamaño -> MD5)."""
     size_groups = {}
-    
-    # Fase 1: Agrupar por peso
     for root, _, files in os.walk(target_dir):
         for file in files:
             file_path = os.path.join(root, file)
             try:
                 size = os.path.getsize(file_path)
-                if size > 0:  # Ignorar archivos vacíos
+                if size > 0:
                     size_groups.setdefault(size, []).append(file_path)
             except Exception:
                 continue
 
     potential_duplicates = {size: paths for size, paths in size_groups.items() if len(paths) > 1}
-    
     duplicates_by_hash = {}
     total_groups = len(potential_duplicates)
     processed_groups = 0
 
-    # Fase 2: Comprobación de huella MD5
     for size, paths in potential_duplicates.items():
         processed_groups += 1
         if status_callback:
@@ -151,11 +158,10 @@ def find_duplicate_files(target_dir, status_callback=None):
             if file_hash:
                 duplicates_by_hash.setdefault((file_hash, size), []).append(path)
 
-    # Retorna solo grupos con 2 o más copias idénticas
     return {key: paths for key, paths in duplicates_by_hash.items() if len(paths) > 1}
 
 def delete_duplicate_file(file_path):
-    """Elimina un archivo duplicado seleccionado."""
+    """Elimina el archivo duplicado seleccionado."""
     try:
         os.remove(file_path)
         return True

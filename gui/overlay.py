@@ -1,29 +1,43 @@
+import sys
+import os
+import platform
 import tkinter as tk
-import ctypes
-import ctypes.wintypes
 import threading
 import time
 from core.telemetry import get_system_telemetry, get_all_disks_data
 
+IS_WINDOWS = platform.system() == "Windows"
+
+if IS_WINDOWS:
+    import ctypes
+    import ctypes.wintypes
+
+
 # ==============================================================================
-# MEDIDOR REAL DE FPS VÍA ETW / EVENT TRACING DE WINDOWS (DXGI PRESENT)
+# MEDIDOR MULTIPLATAFORMA DE FPS / RENDER
 # ==============================================================================
 class RealTimeFPSCounter:
     def __init__(self):
         self.frame_count = 0
-        self.current_fps = 0
+        self.current_fps = 60  # Valor por defecto/simulado si no hay API de bajo nivel
         self.last_time = time.time()
         self.is_running = True
 
-        # API DWM / DXGI Nativa para captura precisa de eventos de cuadro
-        self.dwmapi = ctypes.windll.dwmapi
-        
-        # Iniciar hilo de conteo continuo
+        self.dwmapi = None
+        if IS_WINDOWS:
+            try:
+                self.dwmapi = ctypes.windll.dwmapi
+            except Exception:
+                self.dwmapi = None
+
         self.thread = threading.Thread(target=self._tracker_loop, daemon=True)
         self.thread.start()
 
     def _get_kernel_presents(self):
-        """Consulta el contador acumulativo real de cuadros presentados por el motor gráfico."""
+        """Consulta el contador acumulativo real de cuadros si se ejecuta en Windows."""
+        if not IS_WINDOWS or not self.dwmapi:
+            return None
+
         try:
             class UNSIGNED_RATIO(ctypes.Structure):
                 _fields_ = [("uiNumerator", ctypes.c_uint32), ("uiDenominator", ctypes.c_uint32)]
@@ -50,10 +64,8 @@ class RealTimeFPSCounter:
 
             info = DWM_TIMING_INFO()
             info.cbSize = ctypes.sizeof(DWM_TIMING_INFO)
-            
-            # Consultar timing general del bus de renderizado DXGI
+
             if self.dwmapi.DwmGetCompositionTimingInfo(0, ctypes.byref(info)) == 0:
-                # Priorizar buffers entregados por la GPU en juegos DX11/DX12
                 if info.cFrameSubmitted > 0:
                     return info.cFrameSubmitted
                 elif info.cFramesDisplayed > 0:
@@ -65,12 +77,11 @@ class RealTimeFPSCounter:
         return None
 
     def _tracker_loop(self):
-        """Calcula FPS reales midiendo la diferencia exacta de frames por segundo real."""
         last_frames = self._get_kernel_presents()
         last_time = time.perf_counter()
 
         while self.is_running:
-            time.sleep(0.25)  # Muestreo cada 250ms para respuesta fluida
+            time.sleep(0.25)
             now = time.perf_counter()
             current_frames = self._get_kernel_presents()
 
@@ -79,12 +90,12 @@ class RealTimeFPSCounter:
                 delta_time = now - last_time
 
                 if delta_time > 0 and delta_frames >= 0:
-                    # FPS exactos calculados matemáticamente sin aproximaciones
                     calculated_fps = int(delta_frames / delta_time)
-                    
-                    # Evitar picos anómalos de transición de ventana
                     if 0 <= calculated_fps <= 360:
                         self.current_fps = calculated_fps
+            else:
+                # Si estamos en Linux / macOS donde no hay DWM Present API
+                self.current_fps = "N/A"
 
             last_frames = current_frames
             last_time = now
@@ -94,31 +105,35 @@ class RealTimeFPSCounter:
 
 
 # ==============================================================================
-# CLASE PRINCIPAL DEL OVERLAY
+# OVERLAY MULTIPLATAFORMA EN TIEMPO REAL
 # ==============================================================================
 class GameOverlay(tk.Toplevel):
     def __init__(self, master=None):
         super().__init__(master)
 
-        # 1. Configuración de ventana transparente
         self.overrideredirect(True)
         self.TRANS_COLOR = "#000001"
         self.configure(bg=self.TRANS_COLOR)
-        self.wm_attributes("-transparentcolor", self.TRANS_COLOR)
         self.wm_attributes("-topmost", True)
 
-        self.geometry("260x140+30+30")
+        if IS_WINDOWS:
+            try:
+                self.wm_attributes("-transparentcolor", self.TRANS_COLOR)
+            except Exception:
+                pass
+        else:
+            self.attributes("-alpha", 0.88)
 
-        # Variables de estado
+        self.geometry("270x150+30+30")
+
         self._offsetx = 0
         self._offsety = 0
         self.latest_text = "⚡ Cargando Overlay..."
         self.is_running = True
-        
-        # Medidor real de FPS
+
         self.fps_tracker = RealTimeFPSCounter()
 
-        # 2. Diseño de Tarjeta Neón
+        # Marco Principal
         self.card = tk.Frame(
             self,
             bg="#0d1322",
@@ -138,22 +153,24 @@ class GameOverlay(tk.Toplevel):
         )
         self.lbl_telemetry.pack(padx=8, pady=6, fill="both", expand=True)
 
-        # Eventos para mover con el ratón
+        # Mover ventana arrastrando con mouse
         self.card.bind("<ButtonPress-1>", self.start_move)
         self.card.bind("<B1-Motion>", self.do_move)
         self.lbl_telemetry.bind("<ButtonPress-1>", self.start_move)
         self.lbl_telemetry.bind("<B1-Motion>", self.do_move)
 
-        # Obtener HWND Win32
-        self.hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
-        if self.hwnd == 0:
-            self.hwnd = self.winfo_id()
+        if IS_WINDOWS:
+            try:
+                self.hwnd = ctypes.windll.user32.GetParent(self.winfo_id())
+                if self.hwnd == 0:
+                    self.hwnd = self.winfo_id()
+                self._apply_initial_win32_styles()
+            except Exception:
+                self.hwnd = None
+        else:
+            self.hwnd = None
 
-        self._apply_initial_win32_styles()
-
-        # 3. Hilo de Telemetría (Refresco ligero cada 1.0s para consumo ~0% CPU)
         threading.Thread(target=self._telemetry_worker, daemon=True).start()
-
         self.update_ui_loop()
 
     def start_move(self, event):
@@ -166,6 +183,8 @@ class GameOverlay(tk.Toplevel):
         self.geometry(f"+{x}+{y}")
 
     def _apply_initial_win32_styles(self):
+        if not IS_WINDOWS or not self.hwnd:
+            return
         try:
             GWL_EXSTYLE = -20
             WS_EX_TOPMOST = 0x00000008
@@ -182,7 +201,6 @@ class GameOverlay(tk.Toplevel):
             pass
 
     def _telemetry_worker(self):
-        """Actualiza las métricas de hardware sin ralentizar la CPU."""
         SWP_NOMOVE = 0x0002
         SWP_NOSIZE = 0x0001
         SWP_NOACTIVATE = 0x0010
@@ -191,23 +209,25 @@ class GameOverlay(tk.Toplevel):
 
         while self.is_running:
             try:
-                # Mantener el overlay siempre visible sobre el juego
-                ctypes.windll.user32.SetWindowPos(
-                    self.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
-                )
+                if IS_WINDOWS and self.hwnd:
+                    try:
+                        ctypes.windll.user32.SetWindowPos(
+                            self.hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW
+                        )
+                    except Exception:
+                        pass
 
                 t = get_system_telemetry()
                 disks = get_all_disks_data()
                 disk_health = disks[0]["health"] if disks else 100
-                
-                # Obtener los FPS dinámicos reales
+
                 fps_val = self.fps_tracker.current_fps
 
                 self.latest_text = (
-                    f"⚡ DIAGNOSTIC PC OVERLAY\n"
+                    f"⚡ OVERLAY DIAGNOSTIC PC\n"
                     f"----------------------------\n"
-                    f"FPS  : {fps_val} FPS\n"
+                    f"FPS  : {fps_val}\n"
                     f"CPU  : {t['cpu_usage']:>5.1f}% | {t['cpu_temp']}°C\n"
                     f"RAM  : {t['ram_usage']:>5.1f}% ({t['ram_used_gb']}/{t['ram_total_gb']} GB)\n"
                     f"GPU  : {t['gpu_usage']:>5.1f}% | {t['gpu_temp']}°C\n"
@@ -219,7 +239,6 @@ class GameOverlay(tk.Toplevel):
             time.sleep(1.0)
 
     def update_ui_loop(self):
-        """Refresca la UI rápidamente para que los FPS varíen en tiempo real."""
         if self.winfo_exists():
             self.lbl_telemetry.config(text=self.latest_text)
             self.after(250, self.update_ui_loop)
