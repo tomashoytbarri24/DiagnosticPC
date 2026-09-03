@@ -1,0 +1,9 @@
+[project]
+name = "corepulse"
+version = "0.9.24.15"
+requires-python = ">=3.12"
+description = "Hardware Monitoring & Diagnostics for Windows"
+
+[tool.corepulse]
+python-policy = "3.12+"
+deep-sensors = "best-effort via pythonnet + HardwareMonitor"

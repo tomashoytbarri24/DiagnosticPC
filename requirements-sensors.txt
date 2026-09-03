@@ -1,0 +1,5 @@
+# Sensores profundos LibreHardwareMonitor (best effort).
+# Se instala por separado para que una futura versión de Python pueda ejecutar
+# CorePulse aunque pythonnet aún no publique wheel compatible.
+pythonnet>=3.1.0; platform_system=="Windows"
+HardwareMonitor>=1.2.1; platform_system=="Windows"

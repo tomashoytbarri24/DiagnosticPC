@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Editores
+.vscode/
+.idea/
+
+# Credenciales y configuración privada
+.env
+.env.*
+!.env.example
+
+# Bases locales, telemetría y datos generados
+*.db
+*.sqlite3
+data/*
+!data/.gitkeep
+logs/*
+!logs/.gitkeep
+
+# Backups y staging temporal
+.corepulse_backups/
+backups/
+payload*/
+apply_ui*.py
+apply_v*.py
+README_UI*.md
+PATCH_NOTES_V*.md
+files/
+
+# Artefactos de pruebas/reportes
+_smoke_pdf_*.pdf
+_stress_pdf_*.pdf
+*.tmp
+
+data/ui_theme.json
