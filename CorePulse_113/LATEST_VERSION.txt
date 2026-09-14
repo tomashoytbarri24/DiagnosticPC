@@ -1,3 +1,0 @@
-CorePulse V113
-Última versión: V113
-Base canónica de runtime: V0.10.2.97w UNIVERSAL_RUNTIME_FIX
