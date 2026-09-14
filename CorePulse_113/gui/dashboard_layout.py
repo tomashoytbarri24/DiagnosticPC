@@ -83,9 +83,10 @@ def _style_sidebar(app):
         pass
     _cfg(getattr(app, 'lbl_brand', None), text='')
     _cfg(getattr(app, 'lbl_subtitle', None), text='')
-    _cfg(getattr(app, '_sidebar_brand_title', None), text='CorePulse', font=(FONT, 15, 'bold'), text_color=TEXT)
-    _cfg(getattr(app, '_sidebar_brand_company', None), text='CEREON TECHNOLOGIES', font=(FONT, 7, 'bold'), text_color=CYAN)
-    _cfg(getattr(app, '_sidebar_brand_rule', None), fg_color=BORDER_SOFT, height=1)
+    # V113: la esquina superior izquierda queda limpia; no se reinyecta branding.
+    _cfg(getattr(app, '_sidebar_brand_title', None), text='')
+    _cfg(getattr(app, '_sidebar_brand_company', None), text='')
+    _cfg(getattr(app, '_sidebar_brand_rule', None), height=0)
     for attr, label in NAV.items():
         b = getattr(app, attr, None)
         if b is None:
@@ -213,20 +214,23 @@ def _build_agent_card(app):
             theme_button.pack_forget()
     except Exception:
         pass
-    if ver is not None:
-        try:
-            ver.pack(side='bottom', fill='x', padx=14, pady=(2, 9))
-        except Exception:
-            pass
-    if theme_button is not None:
-        try:
-            theme_button.pack(side='bottom', fill='x', padx=12, pady=(0, 5))
-        except Exception:
-            pass
     try:
-        card.pack(side='bottom', fill='x', padx=11, pady=(5, 7))
+        # El agente baja un poco para respirar respecto a la navegación.
+        card.pack(side='top', fill='x', padx=11, pady=(20, 8))
     except Exception:
         pass
+    if theme_button is not None:
+        try:
+            # 'Temas' sube y queda asociado visualmente al bloque del agente.
+            theme_button.pack(side='top', fill='x', padx=12, pady=(8, 4))
+        except Exception:
+            pass
+    if ver is not None:
+        try:
+            # La versión queda en la esquina inferior del sidebar.
+            ver.pack(side='bottom', fill='x', padx=14, pady=(3, 10))
+        except Exception:
+            pass
 
 
 def render_agent_card(app, state=None):
@@ -466,9 +470,18 @@ def _style_sidebar_mode(app, mode):
     except Exception:
         pass
 
+    has_brand_block = getattr(app, '_sidebar_brand_block', None) is not None
     for label in _sidebar_section_labels(app):
         try:
-            top_gap = 0 if _text(label).upper() == 'MONITOREO' else (5 if compact else 8)
+            name = _text(label).upper()
+            if name == 'MONITOREO':
+                # Al retirar el branding superior, conservamos el aire visual que
+                # antes aportaba ese bloque. No cambia el ancho ni la navegación.
+                top_gap = 8 if compact else 12 if standard else 14
+                if has_brand_block:
+                    top_gap = 0
+            else:
+                top_gap = 5 if compact else 8
             label.pack_configure(padx=15 if compact else 17, pady=(top_gap, 2 if compact else 3))
         except Exception:
             pass
@@ -518,7 +531,15 @@ def _style_sidebar_mode(app, mode):
         try:
             card.pack_propagate(False)
             card.grid_propagate(False)
-            card.pack_configure(side='bottom', fill='x', padx=9 if compact else 11, pady=(4, 7))
+            try:
+                current_side = str(card.pack_info().get('side') or '')
+            except Exception:
+                current_side = ''
+            if current_side != 'top':
+                card.pack_forget()
+                card.pack(side='top', fill='x', padx=9 if compact else 11, pady=(16 if compact else 20, 8))
+            else:
+                card.pack_configure(fill='x', padx=9 if compact else 11, pady=(16 if compact else 20, 8))
         except Exception:
             pass
         _cfg(getattr(app, '_agent_title', None), height=16, font=(FONT, 7 if compact else 8, 'bold'))
@@ -536,14 +557,14 @@ def _style_sidebar_mode(app, mode):
     _cfg(theme_button, height=29 if compact else 31, corner_radius=8 if compact else 9)
     try:
         if theme_button is not None:
-            theme_button.pack_configure(side='bottom', fill='x', padx=10 if compact else 12, pady=(0, 4 if compact else 5))
+            theme_button.pack_configure(side='top', fill='x', padx=10 if compact else 12, pady=(8 if compact else 10, 4 if compact else 5))
     except Exception:
         pass
 
     ver = getattr(app, '_sidebar_version', None)
     _cfg(ver, text=f'{VERSION_LABEL} · Cereon Technologies', font=(FONT, 6 if compact else 7), text_color=MUTED)
     try:
-        ver.pack_configure(side='bottom', fill='x', padx=11 if compact else 14, pady=(2, 7 if compact else 9))
+        ver.pack_configure(side='bottom', fill='x', padx=11 if compact else 14, pady=(3, 8 if compact else 10))
     except Exception:
         pass
 
@@ -638,7 +659,7 @@ def _style_status_mode(app, mode):
 def _chart_tick_positions(total_points):
     total = max(2, int(total_points or 0))
     last = total - 1
-    positions = [0, round(last * 0.25), round(last * 0.5), round(last * 0.75), last]
+    positions = [1, round(last * 0.28), round(last * 0.56), round(last * 0.80), last]
     deduped = []
     for value in positions:
         value = max(0, min(last, int(value)))
@@ -660,10 +681,10 @@ def _chart_target_height_for(app, mode):
         height = int(app.winfo_height())
     except Exception:
         width, height = (1280, 800)
-    ratio = 0.31 if mode == 'compact' else 0.35 if mode == 'standard' else 0.38
+    ratio = 0.33 if mode == 'compact' else 0.37 if mode == 'standard' else 0.40
     target = int(height * ratio)
-    minimum = 258 if mode == 'compact' else 300 if mode == 'standard' else 330
-    maximum = 330 if mode == 'compact' else 390 if mode == 'standard' else 440
+    minimum = 286 if mode == 'compact' else 326 if mode == 'standard' else 352
+    maximum = 360 if mode == 'compact' else 420 if mode == 'standard' else 468
     if width >= 1700:
         target += 12
     return max(minimum, min(target, maximum))
@@ -676,22 +697,28 @@ def _style_charts(app):
         ticks = _chart_tick_positions(max_points)
         labels = ['-60s', '-45s', '-30s', '-15s', 'Ahora']
         app.fig.set_facecolor(SURFACE)
-        for ax in (app.ax_cpu, app.ax_ram, app.ax_gpu):
-            ax.set_facecolor(SURFACE)
-            ax.tick_params(colors=MUTED, labelsize=8, length=0, pad=5)
+        axes = (app.ax_cpu, app.ax_ram, app.ax_gpu)
+        for ax in axes:
+            ax.set_facecolor(theme_color('#0f1827'))
+            ax.tick_params(axis='x', colors=MUTED, labelsize=8, length=0, pad=6)
+            ax.tick_params(axis='y', colors=MUTED, labelsize=8, length=0, pad=6, labelleft=True)
             ax.grid(False)
             ax.yaxis.grid(True, color=BORDER_SOFT, linestyle='-', linewidth=0.45, alpha=0.65)
-            ax.set_yticks([0, 25, 50, 75, 100])
+            ax.set_axisbelow(True)
+            ax.set_yticks([25, 50, 75, 100])
             ax.set_xticks(ticks)
             ax.set_xticklabels(labels)
             ax.set_ylim(0, 100)
             ax.set_xlim(0, max_points - 1)
+            ax.margins(x=0.02, y=0.10)
             ax.title.set_color(TEXT_2)
             ax.title.set_fontsize(9)
             ax.title.set_fontweight('bold')
-            for spine in ax.spines.values():
-                spine.set_visible(False)
-        app.fig.subplots_adjust(left=0.038, right=0.992, top=0.90, bottom=0.16, wspace=0.10)
+            for side, spine in ax.spines.items():
+                spine.set_visible(True)
+                spine.set_linewidth(1.0 if side in ('left', 'bottom') else 0.9)
+                spine.set_color(BORDER if side in ('left', 'bottom') else BORDER_SOFT)
+        app.fig.subplots_adjust(left=0.052, right=0.985, top=0.86, bottom=0.22, wspace=0.18)
         app.background = None
     except Exception:
         pass
@@ -707,13 +734,8 @@ def _sync_chart_figure_geometry(app, mode):
     try:
         app.update_idletasks()
         width = max(760, int(frame.winfo_width()) - 16)
-        header = getattr(app, '_trend_header', None)
-        try:
-            header_h = int(header.winfo_reqheight()) + 10 if header is not None else 0
-        except Exception:
-            header_h = 0
-        min_plot_h = 208 if mode == 'compact' else 244 if mode == 'standard' else 272
-        inner_h = int(frame.winfo_height()) - header_h - 18
+        min_plot_h = 226 if mode == 'compact' else 258 if mode == 'standard' else 286
+        inner_h = int(frame.winfo_height()) - 20
         height = max(min_plot_h, inner_h)
         dpi = float(fig.get_dpi() or 96.0)
         fig.set_size_inches(width / dpi, height / dpi, forward=True)
@@ -722,14 +744,14 @@ def _sync_chart_figure_geometry(app, mode):
             side='top',
             fill='both',
             expand=True,
-            padx=8 if mode == 'compact' else 10,
-            pady=(2, 8 if mode == 'compact' else 10),
+            padx=12 if mode == 'compact' else 14,
+            pady=(8, 10),
         )
         try:
             canvas_widget.configure(height=height)
         except Exception:
             pass
-        fig.subplots_adjust(left=0.038, right=0.992, top=0.90, bottom=0.16, wspace=0.10)
+        fig.subplots_adjust(left=0.052, right=0.985, top=0.86, bottom=0.22, wspace=0.18)
         app.background = None
     except Exception:
         pass
@@ -848,7 +870,6 @@ def _enter(app):
     app.is_resizing = True
     app.is_fullscreen = True
     _cancel(app, '_resize_after_id')
-
     def stage_fullscreen():
         try:
             try:

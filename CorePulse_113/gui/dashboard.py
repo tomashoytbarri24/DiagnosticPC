@@ -700,26 +700,15 @@ def _rebuild_sidebar(app):
     _safe_config(app.lbl_subtitle, text='')
     _safe_pack_forget(app.card_health_sidebar)
 
-    brand = ctk.CTkFrame(app.sidebar, fg_color='transparent', height=48)
-    brand.pack(fill='x', padx=16, pady=(10, 4))
-    brand.pack_propagate(False)
-    app._sidebar_brand_title = ctk.CTkLabel(
-        brand, text='CorePulse', font=(FONT, 15, 'bold'),
-        text_color=COLORS['text'], anchor='w', height=23,
-    )
-    app._sidebar_brand_title.pack(fill='x', anchor='w')
-    app._sidebar_brand_company = ctk.CTkLabel(
-        brand, text='CEREON TECHNOLOGIES', font=(FONT, 7, 'bold'),
-        text_color=COLORS['primary'], anchor='w', height=15,
-    )
-    app._sidebar_brand_company.pack(fill='x', anchor='w')
-    app._sidebar_brand_block = brand
-
-    app._sidebar_brand_rule = ctk.CTkFrame(app.sidebar, height=1, fg_color=COLORS['border_soft'])
-    app._sidebar_brand_rule.pack(fill='x', padx=16, pady=(0, 7))
+    # V113: se elimina por completo la identidad textual de la esquina superior
+    # izquierda. El sidebar arranca directamente en navegación y gana altura útil.
+    app._sidebar_brand_title = None
+    app._sidebar_brand_company = None
+    app._sidebar_brand_block = None
+    app._sidebar_brand_rule = None
 
     monitor = _section_label(app.sidebar, 'MONITOREO')
-    monitor.pack(fill='x', padx=17, pady=(0, 3))
+    monitor.pack(fill='x', padx=17, pady=(12, 3))
 
     _load_sidebar_icons(app)
 
@@ -770,7 +759,8 @@ def _rebuild_sidebar(app):
         font=(FONT, 9, 'bold'),
         command=getattr(app, 'open_themes', None),
     )
-    app._theme_toggle_button.pack(side='bottom', fill='x', padx=12, pady=(2, 5))
+    # V113: 'Temas' deja de quedar pegado al fondo; se ubica debajo del agente.
+    app._theme_toggle_button.pack(side='top', fill='x', padx=12, pady=(8, 4))
 
     app._sidebar_version = ctk.CTkLabel(
         app.sidebar,
@@ -780,6 +770,7 @@ def _rebuild_sidebar(app):
         text_color=COLORS['muted'],
         anchor='w',
     )
+    # V113: la versión vuelve a la esquina inferior izquierda del sidebar.
     app._sidebar_version.pack(side='bottom', fill='x', padx=14, pady=(3, 10))
 
 
@@ -905,50 +896,6 @@ def _series_stats(values):
     }
 
 
-def _ensure_trend_header(app):
-    """Crea una sola cabecera para tendencias, evitando repetir valores actuales.
-
-    El Resumen ya muestra CPU/RAM/GPU actuales en las tarjetas superiores. La
-    zona inferior se dedica únicamente a evolución temporal, por lo que no
-    vuelve a presentar "Actual" ni crea tres tarjetas redundantes.
-    """
-    if getattr(app, '_trend_header', None) is not None:
-        return
-
-    header = ctk.CTkFrame(app.frame_charts, fg_color='transparent')
-    try:
-        header.pack(fill='x', padx=12, pady=(10, 2), before=app.canvas.get_tk_widget())
-    except Exception:
-        header.pack(fill='x', padx=12, pady=(10, 2))
-
-    left = ctk.CTkFrame(header, fg_color='transparent')
-    left.pack(side='left', fill='x', expand=True)
-    ctk.CTkLabel(
-        left,
-        text='TENDENCIAS DE TELEMETRÍA',
-        font=(FONT, 9, 'bold'),
-        text_color=COLORS['text'],
-        anchor='w',
-    ).pack(anchor='w')
-    ctk.CTkLabel(
-        left,
-        text='Evolución de uso durante los últimos 60 segundos',
-        font=(FONT, 8),
-        text_color=COLORS['muted'],
-        anchor='w',
-    ).pack(anchor='w', pady=(1, 0))
-
-    ctk.CTkLabel(
-        header,
-        text='Datos reales · sin duplicar el valor actual',
-        font=(FONT, 8, 'bold'),
-        text_color=COLORS['primary'],
-        anchor='e',
-    ).pack(side='right', padx=(12, 0))
-
-    app._trend_header = header
-
-
 def _update_trend_titles(app):
     """Mantiene títulos limpios; promedio/pico quedan fuera del Resumen.
 
@@ -982,7 +929,6 @@ def _apply_chart_geometry_alignment(app):
 
 
 def _style_charts(app):
-    _ensure_trend_header(app)
     _safe_config(
         app.frame_charts,
         fg_color=COLORS['surface'],
@@ -992,16 +938,22 @@ def _style_charts(app):
     )
     try:
         app.fig.set_facecolor(COLORS['surface'])
-        for ax in (app.ax_cpu, app.ax_ram, app.ax_gpu):
-            ax.set_facecolor(COLORS['surface'])
-            ax.tick_params(colors=COLORS['muted'], labelsize=7, length=0, pad=3)
+        axes = (app.ax_cpu, app.ax_ram, app.ax_gpu)
+        for ax in axes:
+            ax.set_facecolor(theme_color('#0f1827'))
+            ax.tick_params(axis='x', colors=COLORS['muted'], labelsize=8, length=0, pad=6)
+            ax.tick_params(axis='y', colors=COLORS['muted'], labelsize=8, length=0, pad=6, labelleft=True)
             ax.grid(False)
             ax.yaxis.grid(True, color=COLORS['border_soft'], linestyle='-', linewidth=0.45, alpha=0.55)
-            ax.set_yticks([0, 25, 50, 75, 100])
+            ax.set_axisbelow(True)
+            ax.set_yticks([25, 50, 75, 100])
             ax.set_xticks([0, 6, 12, 18, 24])
             ax.set_xticklabels(['-60s', '-45s', '-30s', '-15s', 'Ahora'])
-            for spine in ax.spines.values():
-                spine.set_visible(False)
+            ax.margins(x=0.02, y=0.10)
+            for side, spine in ax.spines.items():
+                spine.set_visible(True)
+                spine.set_linewidth(1.0 if side in ('left', 'bottom') else 0.9)
+                spine.set_color(COLORS['border'] if side in ('left', 'bottom') else COLORS['border_soft'])
         _update_trend_titles(app)
         _apply_chart_geometry_alignment(app)
         app.background = None

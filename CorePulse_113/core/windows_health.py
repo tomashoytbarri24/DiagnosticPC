@@ -873,26 +873,94 @@ def analyze_crashes(days: int = 7, max_events: int = 500) -> Dict[str, Any]:
     }
 
 
+def _driver_hardware_priority(row: Dict[str, Any]) -> tuple[int, str]:
+    """Prioriza controladores que representan hardware útil para el usuario.
+
+    Win32_PnPSignedDriver también devuelve una gran cantidad de dispositivos
+    virtuales/inbox de Windows (WAN Miniport, colas de impresión, etc.). Esos
+    registros son válidos, pero no deben desplazar de la vista principal a GPU,
+    red, audio, almacenamiento, Bluetooth o controladores de plataforma.
+
+    La clasificación usa únicamente DeviceClass/DeviceName/Provider reales.
+    """
+    device_class = str(row.get('DeviceClass') or '').strip().upper()
+    name = str(row.get('DeviceName') or '').strip()
+    provider = str(row.get('DriverProviderName') or '').strip()
+    text = f'{name} {provider}'.casefold()
+
+    # Los dispositivos virtuales/inbox de Windows siguen formando parte del
+    # inventario y del conteo, pero no desplazan hardware físico relevante en
+    # la tabla principal.
+    if _microsoft_inbox_driver(row):
+        return 0, 'WINDOWS / VIRTUAL'
+
+    if device_class == 'DISPLAY':
+        return 100, 'GPU / VIDEO'
+    if device_class == 'NET':
+        return 95, 'RED'
+    if device_class in ('MEDIA', 'AUDIOENDPOINT'):
+        return 90, 'AUDIO'
+    if device_class in ('HDC', 'SCSIADAPTER', 'STORAGEVOLUMES', 'DISKDRIVE') or any(
+        token in text for token in ('nvme', 'sata', 'ahci', 'raid', 'storage controller', 'rst', 'vmd')
+    ):
+        return 88, 'ALMACENAMIENTO'
+    if device_class == 'BLUETOOTH' or 'bluetooth' in text:
+        return 84, 'BLUETOOTH'
+    if device_class in ('USB', 'USBDEVICE') or any(token in text for token in ('xhci', 'usb host controller')):
+        return 78, 'USB'
+    if device_class == 'SYSTEM' and any(token in text for token in (
+        'chipset', 'smbus', 'management engine', 'serial io', 'gpio',
+        'pci express root', 'pcie root', 'dynamic tuning', 'platform',
+        'thermal framework', 'amd gpio', 'amd pci', 'intel(r) pci',
+    )):
+        return 82, 'CHIPSET / PLATAFORMA'
+    return 0, 'OTRO'
+
+
+def _microsoft_inbox_driver(row: Dict[str, Any]) -> bool:
+    provider = str(row.get('DriverProviderName') or '').strip().casefold()
+    name = str(row.get('DeviceName') or '').strip().casefold()
+    device_class = str(row.get('DeviceClass') or '').strip().upper()
+    if provider not in ('microsoft', 'microsoft corporation'):
+        return False
+    # Elementos virtuales/genéricos típicos de Windows. La fecha del paquete no
+    # se usa como señal de "driver importante desactualizado".
+    return (
+        name.startswith('wan miniport')
+        or 'local print queue' in name
+        or 'generic software device' in name
+        or device_class in ('PRINTQUEUE', 'SOFTWAREDEVICE')
+    )
+
+
 def analyze_drivers(limit: int = 400) -> Dict[str, Any]:
+    # Importante: no aplicamos Select-Object -First antes de clasificar. El orden
+    # que devuelve WMI no garantiza que GPU/red/audio/almacenamiento aparezcan
+    # dentro de los primeros N registros. Primero leemos el inventario real y
+    # luego priorizamos en Python.
     script = r"""
     $dev=@{}; Get-CimInstance Win32_PnPEntity -ErrorAction SilentlyContinue | ForEach-Object { if($_.PNPDeviceID){ $status=if($null -ne $_.Status){[string]$_.Status}else{'N/A'}; $code=if($null -ne $_.ConfigManagerErrorCode){[string]$_.ConfigManagerErrorCode}else{''}; $dev[$_.PNPDeviceID]=$status+'|'+$code } };
-    Get-CimInstance Win32_PnPSignedDriver | Select-Object -First __LIMIT__ | ForEach-Object {
+    Get-CimInstance Win32_PnPSignedDriver | ForEach-Object {
       $st=$dev[$_.DeviceID]; $parts=if($st){$st -split '\|'}else{@('N/A','')};
       [pscustomobject]@{DeviceName=$_.DeviceName;DeviceClass=$_.DeviceClass;DriverVersion=$_.DriverVersion;DriverProviderName=$_.DriverProviderName;DriverDate=$_.DriverDate;IsSigned=$_.IsSigned;InfName=$_.InfName;DeviceID=$_.DeviceID;DeviceStatus=$parts[0];ConfigManagerErrorCode=if($parts.Count -gt 1){$parts[1]}else{$null}}
     }
-    """.replace('__LIMIT__', str(int(limit)))
+    """
     rows, err = _json_ps(script, timeout=50)
     now = time.time(); items=[]; unsigned=0; old=0; problems=0
     for row in rows:
-        if not isinstance(row, dict): continue
+        if not isinstance(row, dict):
+            continue
         signed = row.get('IsSigned')
-        if signed is False: unsigned += 1
+        if signed is False:
+            unsigned += 1
         date = str(row.get('DriverDate') or '')
         age_years = None
         m = re.search(r'Date\((\d+)', date)
         if m:
-            try: age_years=(now-(int(m.group(1))/1000.0))/(365.25*86400)
-            except Exception: pass
+            try:
+                age_years=(now-(int(m.group(1))/1000.0))/(365.25*86400)
+            except Exception:
+                pass
         elif date:
             try:
                 from datetime import datetime
@@ -900,16 +968,65 @@ def analyze_drivers(limit: int = 400) -> Dict[str, Any]:
                 age_years = (now - parsed.timestamp()) / (365.25*86400)
             except Exception:
                 pass
-        if age_years is not None and age_years > 5: old += 1
+
+        # Los paquetes inbox/genéricos de Microsoft pueden conservar fechas
+        # históricas por compatibilidad/ranking. No los usamos para inflar la
+        # alerta de antigüedad ni para desplazar hardware relevante.
+        inbox_generic = _microsoft_inbox_driver(row)
+        old_actionable = bool(age_years is not None and age_years > 5 and not inbox_generic)
+        if old_actionable:
+            old += 1
+
         code = row.get('ConfigManagerErrorCode')
-        try: code_num=int(code) if code not in (None,'') else 0
-        except Exception: code_num=0
+        try:
+            code_num=int(code) if code not in (None,'') else 0
+        except Exception:
+            code_num=0
         device_bad = code_num != 0 or str(row.get('DeviceStatus') or '').upper() not in ('OK','N/A','')
-        if signed is False or device_bad: problems += 1
-        status = 'DEVICE_PROBLEM' if device_bad else 'UNSIGNED' if signed is False else 'OLD' if age_years is not None and age_years > 5 else 'OK'
-        items.append({**row, 'age_years': age_years, 'status': status})
-    items.sort(key=lambda x: (x.get('status') in ('DEVICE_PROBLEM','UNSIGNED'), x.get('status')=='OLD', x.get('age_years') or 0), reverse=True)
-    return {'items': items, 'count': len(items), 'unsigned': unsigned, 'device_problems': problems, 'older_than_5y': old, 'error': err, 'source': 'Win32_PnPSignedDriver + Win32_PnPEntity', 'note': 'Antigüedad no implica por sí sola un problema.'}
+        if signed is False or device_bad:
+            problems += 1
+
+        importance, category = _driver_hardware_priority(row)
+        status = 'DEVICE_PROBLEM' if device_bad else 'UNSIGNED' if signed is False else 'OLD' if old_actionable else 'OK'
+        items.append({
+            **row,
+            'age_years': age_years,
+            'status': status,
+            'hardware_priority': importance,
+            'hardware_category': category,
+            'microsoft_inbox_generic': inbox_generic,
+        })
+
+    # 1) Problemas reales/no firmados siempre arriba.
+    # 2) Luego hardware que el usuario realmente necesita revisar.
+    # 3) Dentro de la misma prioridad, drivers antiguos de terceros antes que OK.
+    items.sort(
+        key=lambda x: (
+            x.get('status') in ('DEVICE_PROBLEM','UNSIGNED'),
+            int(x.get('hardware_priority') or 0),
+            x.get('status') == 'OLD',
+            x.get('age_years') or 0,
+        ),
+        reverse=True,
+    )
+    scanned_count = len(items)
+    try:
+        safe_limit = max(1, int(limit))
+    except Exception:
+        safe_limit = 400
+    visible_items = items[:safe_limit]
+    important_count = sum(1 for x in items if int(x.get('hardware_priority') or 0) > 0)
+    return {
+        'items': visible_items,
+        'count': scanned_count,
+        'important_count': important_count,
+        'unsigned': unsigned,
+        'device_problems': problems,
+        'older_than_5y': old,
+        'error': err,
+        'source': 'Win32_PnPSignedDriver + Win32_PnPEntity',
+        'note': 'Antigüedad no implica por sí sola un problema. La vista prioriza GPU, red, audio, almacenamiento, chipset/plataforma, Bluetooth y USB.',
+    }
 
 
 def _stable_inventory(inv: Dict[str, Any]):

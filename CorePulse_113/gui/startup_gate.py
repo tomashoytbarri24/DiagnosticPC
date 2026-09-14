@@ -236,6 +236,15 @@ class StartupGate:
         )
         self.percent.grid(row=0, column=1, sticky='e')
 
+        self.branding = ctk.CTkLabel(
+            shell,
+            text='by Cereon Technologies ©',
+            anchor='w',
+            font=('Segoe UI', 10),
+            text_color=MUTED,
+        )
+        self.branding.place(relx=0.055, rely=0.91, anchor='w')
+
     def _center_now(self):
         try:
             self.window.update_idletasks()

@@ -35,6 +35,7 @@ def main():
     check('minimal_logo_only', "self.brand_label = ctk.CTkLabel" in gate and "text=''" in gate)
     check('minimal_progress_bar', 'self.progress = ctk.CTkProgressBar' in gate)
     check('visible_percentage', "self.percent = ctk.CTkLabel" in gate and "text='0%'" in gate and "value * 100.0" in gate)
+    check('cereon_branding', "text='by Cereon Technologies ©'" in gate and "self.branding.place(relx=0.055, rely=0.91, anchor='w')" in gate)
     check('no_startup_status_copy', all(token not in gate for token in ('self.status =', 'self.subtitle =', 'self.detail =', 'CEREON TECHNOLOGIES', 'Sin estimaciones · sólo datos certificados')))
     check('compact_gate', 'WIDTH = 560' in gate and 'HEIGHT = 250' in gate)
 

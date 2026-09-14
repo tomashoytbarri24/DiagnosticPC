@@ -17,6 +17,7 @@ import psutil
 import os
 import platform
 import copy
+import math
 from core.version import VERSION_LABEL
 COREPULSE_ENV_STATUS = {"status": "DEFERRED", "loaded": False}
 IS_WINDOWS = platform.system() == 'Windows'
@@ -163,7 +164,15 @@ class App(ctk.CTk):
         self.title('CorePulse — Hardware Monitoring & Diagnostics')
         self.resizable(True, True)
         self.configure(fg_color=BG_MAIN)
-        self.protocol('WM_DELETE_WINDOW', self.minimize_to_tray)
+        # V113: CorePulse usa chrome propio integrado en la app.
+        # El cierre desde el botón X interno cierra la aplicación; minimizar se
+        # maneja de forma explícita con el botón del título.
+        self.protocol('WM_DELETE_WINDOW', self.on_close)
+        self._custom_chrome_enabled = False
+        self._custom_maximized = False
+        self._custom_restore_geometry = None
+        self._titlebar_drag_origin = None
+        self._titlebar_height = 36
         try:
             from gui.startup_gate import StartupGate
             self._startup_gate = StartupGate(self)
@@ -531,22 +540,26 @@ class App(ctk.CTk):
             matplotlib.use('TkAgg')
             from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
             from matplotlib.figure import Figure
-            self.fig = Figure(figsize=(9.2, 3.35), dpi=96, facecolor=BG_CARD)
+            self.fig = Figure(figsize=(9.4, 3.6), dpi=96, facecolor=BG_CARD)
             self.ax_cpu = self.fig.add_subplot(131, facecolor=BG_CARD)
             self.ax_ram = self.fig.add_subplot(132, facecolor=BG_CARD)
             self.ax_gpu = self.fig.add_subplot(133, facecolor=BG_CARD)
-            x = list(range(self.max_points))
-            self.line_cpu, = self.ax_cpu.plot(x, list(self.cpu_history), color=COLOR_CPU, linewidth=2.6, animated=True)
-            self.line_ram, = self.ax_ram.plot(x, list(self.ram_history), color=COLOR_RAM, linewidth=2.6, animated=True)
-            self.line_gpu, = self.ax_gpu.plot(x, list(self.gpu_history), color=COLOR_GPU, linewidth=2.6, animated=True)
+            cpu_x, cpu_series, cpu_count = self._chart_series_for_display(self.cpu_history)
+            ram_x, ram_series, ram_count = self._chart_series_for_display(self.ram_history)
+            gpu_x, gpu_series, gpu_count = self._chart_series_for_display(self.gpu_history)
+            initial_visible_count = max(cpu_count, ram_count, gpu_count)
+            self.line_cpu, = self.ax_cpu.plot(cpu_x, cpu_series, color=COLOR_CPU, linewidth=2.6, animated=True)
+            self.line_ram, = self.ax_ram.plot(ram_x, ram_series, color=COLOR_RAM, linewidth=2.6, animated=True)
+            self.line_gpu, = self.ax_gpu.plot(gpu_x, gpu_series, color=COLOR_GPU, linewidth=2.6, animated=True)
             self.format_axes(self.ax_cpu, 'CPU (%)')
             self.format_axes(self.ax_ram, 'RAM (%)')
             self.format_axes(self.ax_gpu, 'GPU (%)')
-            self.fig.subplots_adjust(left=0.038, right=0.992, top=0.90, bottom=0.16, wspace=0.10)
+            self.fig.subplots_adjust(left=0.052, right=0.985, top=0.86, bottom=0.22, wspace=0.18)
+            self._refresh_trend_axis_labels(initial_visible_count)
             self.canvas = FigureCanvasTkAgg(self.fig, master=self.frame_charts)
             canvas_widget = self.canvas.get_tk_widget()
             canvas_widget.configure(bg=BG_CARD, highlightthickness=0)
-            canvas_widget.pack(fill='both', expand=True, padx=8, pady=(2, 10))
+            canvas_widget.pack(fill='both', expand=True, padx=14, pady=(8, 10))
             self.canvas.mpl_connect('draw_event', self.on_draw)
             refresh_professional_charts(self)
             try:
@@ -1410,6 +1423,69 @@ class App(ctk.CTk):
         finally:
             self.overlay_window = None
 
+    def _build_custom_titlebar(self):
+        """Compatibilidad: V113 vuelve al borde nativo de Windows."""
+        return
+
+    def _apply_custom_window_chrome(self):
+        """Con borde nativo, no se fuerza overrideredirect."""
+        self._custom_chrome_enabled = False
+        self._refresh_window_maximize_button()
+
+    def _suspend_custom_window_chrome(self):
+        self._custom_chrome_enabled = False
+
+    def _handle_custom_chrome_map(self, event=None):
+        return
+
+    def _begin_titlebar_drag(self, event=None):
+        self._titlebar_drag_origin = None
+
+    def _perform_titlebar_drag(self, event=None):
+        return
+
+    def _end_titlebar_drag(self, event=None):
+        self._titlebar_drag_origin = None
+
+    def _is_window_zoomed(self):
+        try:
+            return str(self.state()) == 'zoomed' or bool(getattr(self, '_custom_maximized', False))
+        except Exception:
+            return bool(getattr(self, '_custom_maximized', False))
+
+    def _refresh_window_maximize_button(self):
+        return
+
+    def _minimize_window_to_taskbar(self):
+        try:
+            self.iconify()
+        except Exception:
+            pass
+
+    def _toggle_window_maximize(self, event=None):
+        if getattr(self, 'is_fullscreen', False):
+            return 'break'
+        try:
+            if str(self.state()) == 'zoomed':
+                self.state('normal')
+            else:
+                self.state('zoomed')
+        except Exception:
+            pass
+        return 'break'
+
+    def _maximize_window(self):
+        try:
+            self.state('zoomed')
+        except Exception:
+            pass
+
+    def _restore_from_maximize(self):
+        try:
+            self.state('normal')
+        except Exception:
+            pass
+
     def create_metric_card(self, parent, title):
         card = ctk.CTkFrame(parent, fg_color=BG_CARD, border_width=1, border_color=BORDER_COLOR, corner_radius=10)
         ctk.CTkLabel(card, text=title, font=('Segoe UI', 9, 'bold'), text_color=COLOR_TEXT_DIM).pack(anchor='w', padx=10, pady=(6, 1))
@@ -1426,13 +1502,100 @@ class App(ctk.CTk):
         return (lbl_val, bar, lbl_sub, children[0] if children else None)
 
     def format_axes(self, ax, title):
-        ax.set_title(title, color=theme_color('#e2e8f0'), fontsize=8, fontweight='bold', pad=6)
+        ax.set_title(title, color=theme_color('#e2e8f0'), fontsize=9, fontweight='bold', pad=10)
         ax.set_ylim(0, 100)
         ax.set_xlim(0, self.max_points - 1)
-        ax.tick_params(colors=COLOR_TEXT_DIM, labelsize=7)
-        for spine in ax.spines.values():
-            spine.set_color('#1e293b')
-        ax.grid(True, color='#1e293b', linestyle='--', linewidth=0.5)
+        ax.set_facecolor(theme_color('#0f1827'))
+        ax.tick_params(axis='x', colors=COLOR_TEXT_DIM, labelsize=8, length=0, pad=6)
+        ax.tick_params(axis='y', colors=COLOR_TEXT_DIM, labelsize=8, length=0, pad=6)
+        ax.set_yticks([25, 50, 75, 100])
+        for side, spine in ax.spines.items():
+            spine.set_visible(True)
+            spine.set_linewidth(1.0 if side in ('left', 'bottom') else 0.9)
+            spine.set_color(theme_color('#23324d') if side in ('top', 'right') else theme_color('#2f4669'))
+        ax.grid(False)
+        ax.yaxis.grid(True, color='#1e293b', linestyle='-', linewidth=0.55, alpha=0.65)
+        try:
+            ax.set_axisbelow(True)
+            ax.margins(x=0.02, y=0.10)
+        except Exception:
+            pass
+
+
+    def _chart_series_for_display(self, values):
+        """Ajusta la serie visible para evitar media gráfica vacía al inicio.
+
+        No inventa muestras: recorta sólo el tramo previo sin datos reales y
+        redistribuye las muestras existentes sobre el ancho disponible.
+        """
+        try:
+            raw = list(values or [])
+        except Exception:
+            raw = []
+        if not raw:
+            return list(range(self.max_points)), [float('nan')] * int(self.max_points), 0
+        first_real = None
+        for index, value in enumerate(raw):
+            try:
+                number = float(value)
+            except Exception:
+                continue
+            if math.isfinite(number):
+                first_real = index
+                break
+        if first_real is None:
+            return list(range(self.max_points)), [float('nan')] * int(self.max_points), 0
+        visible = raw[first_real:]
+        count = len(visible)
+        last = max(0, int(self.max_points) - 1)
+        if count <= 1:
+            x_data = [last]
+        else:
+            step = last / float(count - 1)
+            x_data = [i * step for i in range(count)]
+        return x_data, visible, count
+
+    def _trend_tick_labels_for_count(self, visible_count):
+        total = max(2, int(self.max_points or 2))
+        count = max(0, int(visible_count or 0))
+        full_span_seconds = 60
+        if count <= 1:
+            span_seconds = 5
+        elif count >= total:
+            span_seconds = full_span_seconds
+        else:
+            span_seconds = max(5, int(round(((count - 1) / max(1, total - 1)) * full_span_seconds)))
+        checkpoints = [span_seconds, int(round(span_seconds * 0.75)), int(round(span_seconds * 0.5)), int(round(span_seconds * 0.25))]
+        labels = []
+        for seconds in checkpoints:
+            seconds = max(1, int(seconds))
+            labels.append(f'-{seconds}s')
+        labels.append('Ahora')
+        return labels
+
+    def _refresh_trend_axis_labels(self, visible_count):
+        labels = self._trend_tick_labels_for_count(visible_count)
+        try:
+            last = max(1, int(self.max_points) - 1)
+            ticks = [1, round(last * 0.28), round(last * 0.56), round(last * 0.80), last]
+            deduped = []
+            for value in ticks:
+                value = max(1, min(last, int(value)))
+                if value not in deduped:
+                    deduped.append(value)
+            while len(deduped) < 5:
+                deduped.append(last)
+            for ax in (self.ax_cpu, self.ax_ram, self.ax_gpu):
+                if ax is None:
+                    continue
+                ax.set_xticks(deduped[:5])
+                ax.set_xticklabels(labels)
+        except Exception:
+            pass
+
+    def _refresh_trend_chart_frames(self):
+        """Compatibilidad: ya no dibujamos parches extra; el marco es el propio eje."""
+        return
 
     def on_draw(self, event):
         if not self.is_running or event.canvas != self.canvas:
@@ -1459,10 +1622,14 @@ class App(ctk.CTk):
                     cpu_data = list(self.cpu_history)
                     ram_data = list(self.ram_history)
                     gpu_data = list(self.gpu_history)
-                x_data = list(range(self.max_points))
-                self.line_cpu.set_data(x_data, cpu_data)
-                self.line_ram.set_data(x_data, ram_data)
-                self.line_gpu.set_data(x_data, gpu_data)
+                cpu_x, cpu_series, cpu_count = self._chart_series_for_display(cpu_data)
+                ram_x, ram_series, ram_count = self._chart_series_for_display(ram_data)
+                gpu_x, gpu_series, gpu_count = self._chart_series_for_display(gpu_data)
+                visible_count = max(cpu_count, ram_count, gpu_count)
+                self.line_cpu.set_data(cpu_x, cpu_series)
+                self.line_ram.set_data(ram_x, ram_series)
+                self.line_gpu.set_data(gpu_x, gpu_series)
+                self._refresh_trend_axis_labels(visible_count)
                 self.canvas.restore_region(self.background)
                 self.ax_cpu.draw_artist(self.line_cpu)
                 self.ax_ram.draw_artist(self.line_ram)
@@ -1876,10 +2043,14 @@ class App(ctk.CTk):
                 cpu_data = list(self.cpu_history)
                 ram_data = list(self.ram_history)
                 gpu_data = list(self.gpu_history)
-            x_data = list(range(self.max_points))
-            self.line_cpu.set_data(x_data, cpu_data)
-            self.line_ram.set_data(x_data, ram_data)
-            self.line_gpu.set_data(x_data, gpu_data)
+            cpu_x, cpu_series, cpu_count = self._chart_series_for_display(cpu_data)
+            ram_x, ram_series, ram_count = self._chart_series_for_display(ram_data)
+            gpu_x, gpu_series, gpu_count = self._chart_series_for_display(gpu_data)
+            visible_count = max(cpu_count, ram_count, gpu_count)
+            self.line_cpu.set_data(cpu_x, cpu_series)
+            self.line_ram.set_data(ram_x, ram_series)
+            self.line_gpu.set_data(gpu_x, gpu_series)
+            self._refresh_trend_axis_labels(visible_count)
             # draw() es intencional sólo una vez durante el gate: garantiza que el
             # primer frame visible ya contiene la muestra que acaba de llegar.
             self.canvas.draw()

@@ -319,6 +319,10 @@ class HealthCenterPanel:
         # paginación para no crear cientos de widgets en un único frame.
         self._services_page = 0
         self._services_page_size = 40
+        # V113 — Controladores completos mediante paginación. Se conserva el
+        # orden de prioridad del hardware sin limitar la vista a 12 filas.
+        self._drivers_page = 0
+        self._drivers_page_size = 40
         # V0.10.2.81w — eventos de estabilidad paginados para mantener la UI
         # fluida aunque Windows tenga muchos registros en el período analizado.
         self._stability_page = 0
@@ -3415,9 +3419,49 @@ class HealthCenterPanel:
             )
         elif kind == 'drivers':
             self._kv(card, 'Controladores revisados', data.get('count', 0))
+            self._kv(card, 'Hardware relevante detectado', data.get('important_count', 0), CYAN if data.get('important_count') else TEXT)
             self._kv(card, 'Problemas de dispositivo', data.get('device_problems', 0), RED if data.get('device_problems') else GREEN)
             self._kv(card, 'No firmados', data.get('unsigned', 0), RED if data.get('unsigned') else GREEN)
-            self._kv(card, 'Con más de 5 años', data.get('older_than_5y', 0), AMBER if data.get('older_than_5y') else TEXT)
+            self._kv(card, 'Antiguos de terceros (>5 años)', data.get('older_than_5y', 0), AMBER if data.get('older_than_5y') else TEXT)
+
+            all_items = list(data.get('items') or [])
+            total = len(all_items)
+            page_size = max(1, int(getattr(self, '_drivers_page_size', 40) or 40))
+            page_count = max(1, (total + page_size - 1) // page_size)
+            page = max(0, min(int(getattr(self, '_drivers_page', 0) or 0), page_count - 1))
+            self._drivers_page = page
+            start = page * page_size
+            end = min(total, start + page_size)
+            items = all_items[start:end]
+
+            pager = ctk.CTkFrame(card, fg_color='transparent')
+            pager.pack(fill='x', padx=14, pady=(2, 4))
+            shown_text = (
+                f'Mostrando {start + 1}–{end} de {total} · Página {page + 1} de {page_count}'
+                if total else 'No hay controladores para mostrar'
+            )
+            ctk.CTkLabel(
+                pager, text=shown_text, font=(FONT, 9), text_color=MUTED,
+                anchor='w', justify='left'
+            ).pack(side='left', fill='x', expand=True)
+            if page_count > 1:
+                next_btn = self._button(
+                    pager, 'Siguiente', lambda: self._set_drivers_page(page + 1),
+                    variant='ghost', width=92, height=27
+                )
+                next_btn.pack(side='right', padx=(6, 0))
+                prev_btn = self._button(
+                    pager, 'Anterior', lambda: self._set_drivers_page(page - 1),
+                    variant='ghost', width=92, height=27
+                )
+                prev_btn.pack(side='right')
+                if page <= 0:
+                    try: prev_btn.configure(state='disabled')
+                    except Exception: pass
+                if page >= page_count - 1:
+                    try: next_btn.configure(state='disabled')
+                    except Exception: pass
+
             rows = [
                 [
                     i,
@@ -3426,7 +3470,7 @@ class HealthCenterPanel:
                     x.get('DriverVersion') or 'N/A',
                     _driver_status_label(x.get('status')),
                 ]
-                for i, x in enumerate((data.get('items') or [])[:12], start=1)
+                for i, x in enumerate(items, start=start + 1)
             ]
             self._render_compact_table(
                 card,
@@ -3438,7 +3482,7 @@ class HealthCenterPanel:
                     {'title': 'Estado', 'weight': 3, 'wrap': 140},
                 ],
                 rows=rows,
-                empty_text='No se encontraron controladores destacados en esta consulta.',
+                empty_text='No se encontraron controladores en esta consulta.',
             )
 
     def _repair_state_label(self, value):
@@ -3906,6 +3950,13 @@ class HealthCenterPanel:
         self._services_page = max(0, min(int(page), page_count - 1))
         self._request_render(1)
 
+    def _set_drivers_page(self, page):
+        items = list((self._drivers or {}).get('items') or [])
+        page_size = max(1, int(getattr(self, '_drivers_page_size', 40) or 40))
+        page_count = max(1, (len(items) + page_size - 1) // page_size)
+        self._drivers_page = max(0, min(int(page), page_count - 1))
+        self._request_render(1)
+
     def _run_windows(self, name, fn):
         attr = '_' + name
         btn = getattr(self, '_windows_buttons', {}).get(name)
@@ -3922,6 +3973,8 @@ class HealthCenterPanel:
             setattr(self, attr, payload)
             if name == 'services':
                 self._services_page = 0
+            elif name == 'drivers':
+                self._drivers_page = 0
             elif name == 'crashes':
                 self._stability_page = 0
         self._async(name, fn, done)
