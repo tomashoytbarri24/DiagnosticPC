@@ -305,6 +305,38 @@ class GameDetector:
         self._save_config()
         return True
 
+    def remove_game_from_library(self, exe_name: str) -> bool:
+        """Quita un juego del catálogo de CorePulse sin tocar archivos instalados.
+
+        Los juegos detectados se añaden a exclusiones para evitar que el siguiente
+        scan los vuelva a insertar de inmediato. Un alta manual posterior los
+        reactiva porque ``add_manual_game`` ya retira esa exclusión explícita.
+        """
+        exe = _norm_exe(exe_name)
+        if not exe or exe in DEFAULT_EXCLUDED:
+            return False
+        manual = set(self._config.get('manual_exes') or [])
+        learned = set(self._config.get('learned_exes') or [])
+        if exe not in manual and exe not in learned:
+            return False
+
+        self._config['manual_exes'] = sorted(manual - {exe})
+        self._config['learned_exes'] = sorted(learned - {exe})
+        for key in ('manual_paths', 'manual_titles', 'learned_paths', 'learned_sources', 'learned_titles', 'learned_game_ids', 'artwork_overrides'):
+            mapping = dict(self._config.get(key) or {})
+            mapping.pop(exe, None)
+            self._config[key] = mapping
+
+        canonical = dict(self._config.get('canonical_by_game_id') or {})
+        canonical = {gid: value for gid, value in canonical.items() if _norm_exe(value) != exe}
+        self._config['canonical_by_game_id'] = canonical
+
+        excluded = set(self._config.get('excluded_exes') or [])
+        excluded.add(exe)
+        self._config['excluded_exes'] = sorted(excluded | DEFAULT_EXCLUDED)
+        self._save_config()
+        return True
+
     def exclude(self, exe_name: str) -> bool:
         exe = _norm_exe(exe_name)
         if not exe:
@@ -369,6 +401,17 @@ class GameDetector:
             root_match = _match_path(root)
             if match == root_match or match.startswith(root_match + '/'):
                 return f'EPIC|{root_match}', root
+
+        # Riot instala sus productos bajo una raíz explícita 'Riot Games'.
+        # Esta evidencia de ruta permite conservar RIOT como procedencia real en
+        # lugar de degradarlo a LEARNED/RTSS, mejorando también el artwork.
+        marker = '/riot games/'
+        if marker in match:
+            prefix, rest = match.split(marker, 1)
+            product = rest.split('/', 1)[0] if rest else ''
+            if product:
+                inferred = f'{prefix}{marker}{product}'
+                return f'RIOT|{inferred}', inferred
 
         return '', ''
 
@@ -832,6 +875,8 @@ class GameDetector:
                     source, game_id, install_root = 'STEAM', inferred_id, inferred_root
                 elif inferred_id.startswith('EPIC|'):
                     source, game_id, install_root = 'EPIC', inferred_id, inferred_root
+                elif inferred_id.startswith('RIOT|'):
+                    source, game_id, install_root = 'RIOT', inferred_id, inferred_root
                 elif name in self._epic_launch_exes:
                     source = 'EPIC'
                     game_id = inferred_id or f'EPIC_EXE|{name}'
@@ -884,7 +929,7 @@ class GameDetector:
                 'source': winner.get('source') or 'LEARNED',
             }
             selected.append(public)
-            if public['source'] in {'STEAM', 'EPIC', 'RTSS', 'LEARNED'}:
+            if public['source'] in {'STEAM', 'EPIC', 'RIOT', 'RTSS', 'LEARNED'}:
                 # LEARNED también actualiza identidad para migrar catálogos antiguos.
                 self._learn(winner.get('raw_name') or public['name'], public['exe'], public['source'], game_id=game_id)
             dropped = [x['name'] for x in group if int(x.get('pid') or 0) != public['pid']]

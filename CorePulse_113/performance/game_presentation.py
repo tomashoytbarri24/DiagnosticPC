@@ -10,8 +10,12 @@ from __future__ import annotations
 import logging
 import os
 import json
+import io
+import hashlib
 from pathlib import Path
 import re
+import urllib.parse
+import urllib.request
 from typing import Optional
 
 from PIL import Image, ImageDraw, ImageOps
@@ -334,7 +338,7 @@ def _load_nvidia_application_index():
     return app_root, applications, images
 
 
-def _nvidia_record_match_score(record, exe: Path) -> float:
+def _nvidia_record_match_score(record, exe: Path, title_hint: str | None = None) -> float:
     strings = _iter_record_strings(record)
     if not strings:
         return -1.0
@@ -343,6 +347,7 @@ def _nvidia_record_match_score(record, exe: Path) -> float:
     exe_stem = exe.stem.casefold()
     parent_norm = _normalized_path_text(exe.parent)
     score = 0.0
+    title_tokens = _artwork_tokens(title_hint) if title_hint else set()
     for raw in strings:
         text = str(raw or '').strip()
         low = text.casefold()
@@ -355,6 +360,9 @@ def _nvidia_record_match_score(record, exe: Path) -> float:
             score = max(score, 120.0)
         elif exe_stem and len(exe_stem) >= 5 and exe_stem in low:
             score = max(score, 62.0)
+        compact = re.sub(r'[^a-z0-9]+', '', low)
+        if title_tokens and any(token in compact for token in title_tokens if len(token) >= 4):
+            score = max(score, 105.0)
     return score
 
 
@@ -389,7 +397,7 @@ def _nvidia_artwork_tokens(record, exe: Path):
     return clean
 
 
-def discover_nvidia_app_artwork(exe_path: str | os.PathLike | None) -> Optional[Path]:
+def discover_nvidia_app_artwork(exe_path: str | os.PathLike | None, *, title_hint: str | None = None) -> Optional[Path]:
     """Obtiene artwork local que NVIDIA App ya asoció al ejecutable.
 
     No contiene rutas de usuario ni nombres de juegos codificados. La asociación
@@ -408,14 +416,15 @@ def discover_nvidia_app_artwork(exe_path: str | os.PathLike | None) -> Optional[
         return None
     ranked = []
     for record in applications:
-        score = _nvidia_record_match_score(record, exe)
-        if score >= 100:
+        score = _nvidia_record_match_score(record, exe, title_hint=title_hint)
+        if score >= 60:
             ranked.append((score, record))
     if not ranked:
         return None
     ranked.sort(key=lambda item: item[0], reverse=True)
     record = ranked[0][1]
     tokens = _nvidia_artwork_tokens(record, exe)
+    tokens.update(_artwork_tokens(title_hint))
 
     # Primera opción: si el registro contiene una ruta local de imagen, úsala.
     for raw_value in _iter_record_strings(record):
@@ -441,8 +450,8 @@ def discover_nvidia_app_artwork(exe_path: str | os.PathLike | None) -> Optional[
 
 _ARTWORK_KEYWORDS = (
     ('library_hero', 80), ('hero', 70), ('header', 68), ('banner', 62),
-    ('capsule', 58), ('cover', 54), ('keyart', 50), ('background', 44),
-    ('library', 36),
+    ('capsule', 58), ('cover', 54), ('keyart', 52), ('key_art', 52),
+    ('splash', 50), ('background', 44), ('library', 36), ('promo', 32),
 )
 
 
@@ -569,7 +578,566 @@ def _best_artwork(candidates):
     return best if best_score > -500 else None
 
 
-def discover_local_game_artwork(exe_path: str | os.PathLike | None) -> Optional[Path]:
+
+
+def _artwork_tokens(*values) -> set[str]:
+    """Tokens conservadores para asociar una imagen a un juego/launcher sin adivinar."""
+    stop = {
+        'game', 'games', 'launcher', 'client', 'shipping', 'win64', 'win32',
+        'x64', 'live', 'release', 'retail', 'program', 'files', 'epic', 'riot',
+        'steam', 'content', 'engine', 'binaries', 'windows',
+    }
+    tokens = set()
+    for value in values:
+        raw = str(value or '').casefold()
+        if not raw:
+            continue
+        for part in re.split(r'[^a-z0-9]+', raw):
+            if len(part) >= 4 and part not in stop:
+                tokens.add(part)
+        compact = re.sub(r'[^a-z0-9]+', '', raw)
+        if 5 <= len(compact) <= 80 and compact not in stop:
+            tokens.add(compact)
+    return tokens
+
+
+def _path_contains(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+        return True
+    except Exception:
+        p = _normalized_path_text(path)
+        r = _normalized_path_text(root)
+        return bool(r and (p == r or p.startswith(r.rstrip('\\/') + os.sep)))
+
+
+def _bounded_images(root: Path, *, max_depth=5, limit=320):
+    """Inventario acotado: nunca recorre una biblioteca completa sin límite."""
+    if not root or not root.is_dir():
+        return []
+    found = []
+    try:
+        base_depth = len(root.parts)
+        for folder, dirs, files in os.walk(root):
+            depth = len(Path(folder).parts) - base_depth
+            if depth >= max_depth:
+                dirs[:] = []
+            for name in files:
+                if len(found) >= limit:
+                    return found
+                path = Path(folder) / name
+                if path.suffix.lower() in _ARTWORK_EXTENSIONS:
+                    found.append(path)
+    except OSError:
+        pass
+    return found
+
+
+def _best_token_matched_artwork(candidates, tokens: set[str], *, allow_keyword_only=False):
+    """Elige arte sólo con evidencia de identidad o semántica fuerte de portada."""
+    best = None
+    best_score = -10000.0
+    for candidate in candidates:
+        try:
+            compact = re.sub(r'[^a-z0-9]+', '', str(candidate).casefold())
+            low = str(candidate).casefold()
+        except Exception:
+            continue
+        token_hits = [t for t in tokens if len(t) >= 4 and t in compact]
+        keyword_hit = any(keyword in low for keyword, _ in _ARTWORK_KEYWORDS)
+        if not token_hits and not (allow_keyword_only and keyword_hit):
+            continue
+        score = _artwork_score(candidate)
+        score += min(180.0, 42.0 * len(token_hits))
+        if keyword_hit:
+            score += 28.0
+        if score > best_score:
+            best, best_score = candidate, score
+    return best if best_score > -500 else None
+
+
+
+def _materialize_cached_artwork(blob: bytes, tokens: set[str], namespace: str) -> Optional[Path]:
+    """Extrae una imagen real de un entry Chromium/Electron sólo si su key/url prueba identidad.
+
+    Epic/Riot usan caches web con nombres hash/extensionless. El nombre del archivo no
+    sirve para asociarlo al juego, por lo que exigimos que el propio entry contenga un
+    token del título/catalog id antes de extraer JPEG/PNG/WebP embebido.
+    """
+    if not blob or not tokens:
+        return None
+    low = blob.lower()
+    matched = False
+    for token in tokens:
+        try:
+            raw = token.encode('utf-8', errors='ignore').lower()
+        except Exception:
+            continue
+        if len(raw) >= 4 and raw in low:
+            matched = True
+            break
+    if not matched:
+        return None
+
+    offsets = []
+    for magic in (b'\xff\xd8\xff', b'\x89PNG\r\n\x1a\n'):
+        start = 0
+        while len(offsets) < 8:
+            idx = blob.find(magic, start)
+            if idx < 0:
+                break
+            offsets.append(idx)
+            start = idx + 1
+    # WebP: RIFF....WEBP
+    start = 0
+    while len(offsets) < 12:
+        idx = blob.find(b'RIFF', start)
+        if idx < 0:
+            break
+        if idx + 12 <= len(blob) and blob[idx + 8:idx + 12] == b'WEBP':
+            offsets.append(idx)
+        start = idx + 4
+
+    best_image = None
+    best_area = 0
+    for offset in sorted(set(offsets)):
+        try:
+            with Image.open(io.BytesIO(blob[offset:])) as image:
+                image.load()
+                width, height = image.size
+                if width < 240 or height < 90:
+                    continue
+                area = width * height
+                if area > best_area:
+                    best_image = image.convert('RGB').copy()
+                    best_area = area
+        except Exception:
+            continue
+    if best_image is None:
+        return None
+
+    local = os.environ.get('LOCALAPPDATA')
+    if not local:
+        return None
+    digest = hashlib.sha256(blob[:65536] + str(best_image.size).encode('ascii')).hexdigest()[:24]
+    target = Path(local) / 'CorePulse' / 'cache' / 'game_artwork' / f'{namespace}_{digest}.jpg'
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if not target.is_file():
+            best_image.save(target, 'JPEG', quality=92, optimize=True)
+        return target if is_supported_artwork_file(target) else None
+    except Exception:
+        logger.debug('[GAME_UI] No se pudo materializar artwork de cache %s', namespace, exc_info=True)
+        return None
+
+
+_OFFICIAL_ARTWORK_HOSTS = {
+    'epic': ('epicgames.com', 'epicgamesusercontent.com', 'unrealengine.com', 'akamaized.net'),
+    'riot': ('riotgames.com', 'riotcdn.net', 'pvp.net', 'playvalorant.com', 'leagueoflegends.com'),
+}
+
+
+def _blob_matches_artwork_tokens(blob: bytes, tokens: set[str]) -> bool:
+    if not blob or not tokens:
+        return False
+    low = blob.lower()
+    for token in tokens:
+        try:
+            raw = token.encode('utf-8', errors='ignore').lower()
+        except Exception:
+            continue
+        if len(raw) >= 4 and raw in low:
+            return True
+    return False
+
+
+def _artwork_urls_from_blob(blob: bytes, tokens: set[str], namespace: str, *, identity_proven=False):
+    """Extrae URLs de imagen sólo de entries que ya prueban la identidad del juego.
+
+    Los launchers Chromium suelen guardar el JSON/HTML con la URL de portada en
+    un archivo y la imagen en otro. La versión anterior exigía token+bytes de la
+    imagen dentro del mismo entry, por lo que Epic/Riot fallaban en caches reales.
+    """
+    if not identity_proven and not _blob_matches_artwork_tokens(blob, tokens):
+        return []
+    try:
+        text = blob.decode('utf-8', errors='ignore').replace('\\/', '/')
+    except Exception:
+        return []
+    hosts = _OFFICIAL_ARTWORK_HOSTS.get(str(namespace or '').lower(), ())
+    urls = []
+    seen = set()
+    pattern = re.compile(r'https?://[^\s"\'<>]+', re.I)
+    for match in pattern.findall(text):
+        url = match.rstrip('),]}\\')
+        low = url.casefold()
+        try:
+            parsed = urllib.parse.urlparse(url)
+            host = (parsed.hostname or '').casefold()
+        except Exception:
+            continue
+        if not host or hosts and not any(host == h or host.endswith('.' + h) for h in hosts):
+            continue
+        path_low = (parsed.path or '').casefold()
+        looks_image = any(ext in path_low for ext in ('.jpg', '.jpeg', '.png', '.webp'))
+        looks_art = any(key in low for key, _ in _ARTWORK_KEYWORDS) or any(word in low for word in ('image', 'landscape', 'offerimage', 'productimage'))
+        if not (looks_image or looks_art):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        score = 0
+        for keyword, points in _ARTWORK_KEYWORDS:
+            if keyword in low:
+                score += points
+                break
+        if looks_image:
+            score += 25
+        if 'landscape' in low:
+            score += 30
+        urls.append((score, url))
+    urls.sort(key=lambda item: item[0], reverse=True)
+    return [url for _score, url in urls[:12]]
+
+
+def _download_official_artwork(url: str, namespace: str) -> Optional[Path]:
+    """Descarga una portada desde una URL oficial ya demostrada por el cache local."""
+    try:
+        parsed = urllib.parse.urlparse(str(url or ''))
+        host = (parsed.hostname or '').casefold()
+        hosts = _OFFICIAL_ARTWORK_HOSTS.get(str(namespace or '').lower(), ())
+        if parsed.scheme != 'https' or not host or not any(host == h or host.endswith('.' + h) for h in hosts):
+            return None
+        local = os.environ.get('LOCALAPPDATA')
+        if not local:
+            return None
+        digest = hashlib.sha256(url.encode('utf-8', errors='ignore')).hexdigest()[:24]
+        target = Path(local) / 'CorePulse' / 'cache' / 'game_artwork' / f'{namespace}_remote_{digest}.jpg'
+        if is_supported_artwork_file(target):
+            return target
+        req = urllib.request.Request(url, headers={'User-Agent': 'CorePulse/113 GameArtwork'})
+        with urllib.request.urlopen(req, timeout=4.0) as response:
+            content_type = str(response.headers.get('Content-Type') or '').casefold()
+            if content_type and 'image/' not in content_type:
+                return None
+            data = response.read(12 * 1024 * 1024 + 1)
+        if not data or len(data) > 12 * 1024 * 1024:
+            return None
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+            width, height = image.size
+            if width < 240 or height < 90:
+                return None
+            rendered = image.convert('RGB')
+        target.parent.mkdir(parents=True, exist_ok=True)
+        rendered.save(target, 'JPEG', quality=92, optimize=True)
+        return target if is_supported_artwork_file(target) else None
+    except Exception:
+        logger.debug('[GAME_UI] Artwork remoto oficial no disponible: %s', url, exc_info=True)
+        return None
+
+
+def _discover_metadata_url_artwork(roots, tokens: set[str], namespace: str, *, limit=120) -> Optional[Path]:
+    """Resuelve URLs oficiales guardadas en metadata ya asociada al producto.
+
+    Riot y otros launchers suelen guardar logo/banner como URL en JSON/YAML y no
+    como archivo de imagen. Si la carpeta/manifest ya fue asociado al ejecutable,
+    no exigimos que el mismo texto repita el título del juego.
+    """
+    urls = []
+    checked = 0
+    allowed_suffixes = {'.json', '.yaml', '.yml', '.txt', '.ini', '.cfg', '.manifest', '.item'}
+    for root in roots:
+        root = Path(root)
+        if not root.exists():
+            continue
+        iterator = [root] if root.is_file() else root.rglob('*')
+        try:
+            for path in iterator:
+                if checked >= limit:
+                    break
+                try:
+                    if not path.is_file() or path.suffix.casefold() not in allowed_suffixes:
+                        continue
+                    size = path.stat().st_size
+                except OSError:
+                    continue
+                if size <= 0 or size > 3 * 1024 * 1024:
+                    continue
+                checked += 1
+                try:
+                    blob = path.read_bytes()
+                except OSError:
+                    continue
+                for url in _artwork_urls_from_blob(blob, tokens, namespace, identity_proven=True):
+                    if url not in urls:
+                        urls.append(url)
+        except OSError:
+            continue
+    for url in urls[:8]:
+        resolved = _download_official_artwork(url, namespace)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _discover_browser_cache_artwork(roots, tokens: set[str], namespace: str, *, limit=520) -> Optional[Path]:
+    """Inspecciona caches Chromium/Electron y resuelve bytes o URLs oficiales."""
+    checked = 0
+    remote_urls = []
+    for root in roots:
+        if not root or not Path(root).is_dir():
+            continue
+        try:
+            base = Path(root)
+            base_depth = len(base.parts)
+            for folder, dirs, files in os.walk(base):
+                depth = len(Path(folder).parts) - base_depth
+                if depth >= 7:
+                    dirs[:] = []
+                for name in files:
+                    if checked >= limit:
+                        break
+                    checked += 1
+                    path = Path(folder) / name
+                    try:
+                        size = path.stat().st_size
+                    except OSError:
+                        continue
+                    if size < 256 or size > 12 * 1024 * 1024:
+                        continue
+                    if path.suffix.lower() in _ARTWORK_EXTENSIONS:
+                        continue
+                    try:
+                        blob = path.read_bytes()
+                    except OSError:
+                        continue
+                    resolved = _materialize_cached_artwork(blob, tokens, namespace)
+                    if resolved is not None:
+                        return resolved
+                    if len(remote_urls) < 24:
+                        for url in _artwork_urls_from_blob(blob, tokens, namespace):
+                            if url not in remote_urls:
+                                remote_urls.append(url)
+                if checked >= limit:
+                    break
+        except OSError:
+            continue
+    # Las descargas se prueban al final para no bloquear el scan local. Máximo 6.
+    for url in remote_urls[:6]:
+        resolved = _download_official_artwork(url, namespace)
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _epic_manifest_for_exe(exe: Path):
+    program_data = Path(os.environ.get('PROGRAMDATA', r'C:\ProgramData'))
+    manifest_dir = program_data / 'Epic' / 'EpicGamesLauncher' / 'Data' / 'Manifests'
+    if not manifest_dir.is_dir():
+        return None, None
+    exe_norm = _normalized_path_text(exe)
+    best = None
+    best_root = None
+    for file in manifest_dir.glob('*.item'):
+        try:
+            data = json.loads(file.read_text(encoding='utf-8', errors='ignore'))
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        raw_root = str(data.get('InstallLocation') or '').strip()
+        if not raw_root:
+            continue
+        root = Path(os.path.expandvars(raw_root))
+        root_norm = _normalized_path_text(root)
+        if root_norm and (exe_norm == root_norm or exe_norm.startswith(root_norm.rstrip('\\/') + os.sep)):
+            best, best_root = data, root
+            break
+        launch = str(data.get('LaunchExecutable') or '').replace('\\', '/').strip().casefold()
+        if launch and exe.name.casefold() == Path(launch).name.casefold():
+            best, best_root = data, root
+    return best, best_root
+
+
+def discover_epic_artwork(exe_path, *, title_hint=None) -> Optional[Path]:
+    """Arte Epic local asociado mediante el manifest real de esa instalación."""
+    raw = str(exe_path or '').strip()
+    if not raw:
+        return None
+    exe = Path(raw)
+    manifest, root = _epic_manifest_for_exe(exe)
+    if not manifest or not root:
+        return None
+    tokens = _artwork_tokens(
+        title_hint, exe.stem, root.name,
+        manifest.get('DisplayName'), manifest.get('AppName'),
+        manifest.get('CatalogItemId'), manifest.get('MainGameAppName'),
+    )
+    # Algunos .item incluyen URLs de splash/key art. El manifest ya quedó
+    # asociado al EXE por InstallLocation/LaunchExecutable, por lo que es seguro
+    # usar únicamente URLs oficiales presentes en ese registro.
+    try:
+        manifest_blob = json.dumps(manifest, ensure_ascii=False).encode('utf-8')
+    except Exception:
+        manifest_blob = b''
+    for url in _artwork_urls_from_blob(manifest_blob, tokens, 'epic', identity_proven=True):
+        remote = _download_official_artwork(url, 'epic')
+        if remote is not None:
+            return remote
+    candidates = []
+    # Primero la instalación: splashes/key art suelen vivir aquí en juegos UE/Epic.
+    candidates.extend(_candidate_images(root, recursive=False, limit=48))
+    likely_dirs = [
+        root / '.egstore', root / 'Splash', root / 'splash', root / 'Assets', root / 'assets',
+        root / 'Art', root / 'Artwork', root / 'Images', root / 'Media',
+        root / 'Engine' / 'Splash', root / 'Engine' / 'Content' / 'Splash',
+        root / 'Content' / 'Splash',
+    ]
+    try:
+        for child in list(root.iterdir())[:64]:
+            if child.is_dir():
+                likely_dirs.extend([
+                    child / 'Content' / 'Splash', child / 'Splash', child / 'Assets',
+                    child / 'Artwork', child / 'Images',
+                ])
+    except OSError:
+        pass
+    for folder in likely_dirs:
+        candidates.extend(_bounded_images(folder, max_depth=4, limit=100))
+    best = _best_token_matched_artwork(candidates, tokens, allow_keyword_only=True)
+    if best:
+        return best
+
+    # Epic Launcher puede conservar jpg/png con identificadores del catálogo.
+    local = os.environ.get('LOCALAPPDATA')
+    if local:
+        saved = Path(local) / 'EpicGamesLauncher' / 'Saved'
+        cache_candidates = _bounded_images(saved, max_depth=7, limit=900)
+        best = _best_token_matched_artwork(cache_candidates, tokens, allow_keyword_only=False)
+        if best:
+            return best
+        webcache_roots = []
+        try:
+            webcache_roots.extend(p for p in saved.glob('webcache*') if p.is_dir())
+        except OSError:
+            pass
+        cached = _discover_browser_cache_artwork(webcache_roots, tokens, 'epic')
+        if cached is not None:
+            return cached
+    return None
+
+
+def _riot_install_root(exe: Path) -> Optional[Path]:
+    """Resuelve raíz Riot desde ruta real o RiotClientInstalls.json."""
+    raw = _normalized_path_text(exe)
+    for parent in [exe.parent, *exe.parents]:
+        if parent.name.casefold() in {'valorant', 'league of legends', 'riot games'}:
+            if parent.name.casefold() == 'riot games':
+                # El hijo directo identifica el producto cuando existe.
+                try:
+                    rel = exe.relative_to(parent)
+                    return parent / rel.parts[0] if rel.parts else parent
+                except Exception:
+                    return parent
+            return parent
+    program_data = Path(os.environ.get('PROGRAMDATA', r'C:\ProgramData'))
+    installs = program_data / 'Riot Games' / 'RiotClientInstalls.json'
+    try:
+        data = json.loads(installs.read_text(encoding='utf-8', errors='ignore'))
+    except Exception:
+        data = {}
+    strings = _iter_record_strings(data, limit=1000)
+    for value in strings:
+        candidate = Path(os.path.expandvars(str(value)))
+        if candidate.suffix.casefold() == '.exe' and _normalized_path_text(candidate) == raw:
+            return candidate.parent
+    return None
+
+
+def discover_riot_artwork(exe_path, *, title_hint=None, trusted_source=False) -> Optional[Path]:
+    """Busca branding/splash Riot local sin asumir un título concreto."""
+    raw = str(exe_path or '').strip()
+    if not raw:
+        return None
+    exe = Path(raw)
+    normalized = _normalized_path_text(exe)
+    if (not trusted_source) and 'riot games' not in normalized.casefold() and 'valorant' not in normalized.casefold() and 'league of legends' not in normalized.casefold():
+        return None
+    root = _riot_install_root(exe) or exe.parent
+    tokens = _artwork_tokens(title_hint, exe.stem, root.name)
+    candidates = []
+    candidates.extend(_candidate_images(root, recursive=False, limit=40))
+    likely_dirs = [
+        root / 'Splash', root / 'splash', root / 'Assets', root / 'assets',
+        root / 'Images', root / 'images', root / 'Resources', root / 'resources',
+        root / 'Content' / 'Splash', root / 'ShooterGame' / 'Content' / 'Splash',
+    ]
+    for folder in likely_dirs:
+        candidates.extend(_bounded_images(folder, max_depth=5, limit=140))
+
+    program_data = Path(os.environ.get('PROGRAMDATA', r'C:\ProgramData'))
+    metadata_root = program_data / 'Riot Games' / 'Metadata'
+    matched_metadata = []
+    if metadata_root.is_dir():
+        # Los nombres de las carpetas de Metadata son ids reales de producto.
+        for child in list(metadata_root.iterdir())[:96]:
+            if not child.is_dir():
+                continue
+            compact = re.sub(r'[^a-z0-9]+', '', child.name.casefold())
+            if any(t in compact or compact in t for t in tokens if len(t) >= 4):
+                matched_metadata.append(child)
+                candidates.extend(_bounded_images(child, max_depth=5, limit=160))
+                tokens.update(_artwork_tokens(child.name))
+    best = _best_token_matched_artwork(candidates, tokens, allow_keyword_only=True)
+    if best is not None:
+        return best
+    if matched_metadata:
+        remote = _discover_metadata_url_artwork(matched_metadata, tokens, 'riot')
+        if remote is not None:
+            return remote
+    local = os.environ.get('LOCALAPPDATA')
+    if local:
+        riot_local = Path(local) / 'Riot Games'
+        cache_roots = [riot_local / 'Riot Client', riot_local]
+        cached = _discover_browser_cache_artwork(cache_roots, tokens, 'riot')
+        if cached is not None:
+            return cached
+    return None
+
+
+def discover_other_launcher_artwork(exe_path, *, title_hint=None, source_hint=None) -> Optional[Path]:
+    """Caches locales adicionales (GOG/Ubisoft/EA/Battle.net), sólo por match de tokens."""
+    raw = str(exe_path or '').strip()
+    if not raw:
+        return None
+    exe = Path(raw)
+    tokens = _artwork_tokens(title_hint, exe.stem, exe.parent.name)
+    local = os.environ.get('LOCALAPPDATA')
+    program_data = os.environ.get('PROGRAMDATA')
+    roots = []
+    if local:
+        base = Path(local)
+        roots.extend([
+            base / 'GOG.com' / 'Galaxy',
+            base / 'Ubisoft Game Launcher' / 'cache',
+            base / 'Electronic Arts' / 'EA Desktop',
+            base / 'Battle.net',
+        ])
+    if program_data:
+        base = Path(program_data)
+        roots.extend([base / 'GOG.com' / 'Galaxy', base / 'Battle.net'])
+    candidates = []
+    for cache_root in roots:
+        candidates.extend(_bounded_images(cache_root, max_depth=7, limit=420))
+    return _best_token_matched_artwork(candidates, tokens, allow_keyword_only=False)
+
+def discover_local_game_artwork(
+    exe_path: str | os.PathLike | None,
+    *,
+    title_hint: str | None = None,
+    source_hint: str | None = None,
+) -> Optional[Path]:
     """Busca arte *real* ya presente en el PC, sin llamadas de red.
 
     Prioridad: cache local de Steam asociada por AppID demostrado, después assets
@@ -582,6 +1150,17 @@ def discover_local_game_artwork(exe_path: str | os.PathLike | None) -> Optional[
         exe = Path(raw)
     except Exception:
         return None
+
+    source = str(source_hint or '').upper().strip()
+    # Fuentes no-Steam primero cuando existe evidencia del launcher.
+    if source == 'EPIC' or _epic_manifest_for_exe(exe)[0] is not None:
+        epic = discover_epic_artwork(raw, title_hint=title_hint)
+        if epic is not None:
+            return epic
+    if source == 'RIOT' or any(x in _normalized_path_text(exe).casefold() for x in ('riot games', 'valorant', 'league of legends')):
+        riot = discover_riot_artwork(raw, title_hint=title_hint, trusted_source=(source == 'RIOT'))
+        if riot is not None:
+            return riot
 
     appid, game_root, steam_root = _steam_context(raw)
     candidates = []
@@ -605,6 +1184,17 @@ def discover_local_game_artwork(exe_path: str | os.PathLike | None) -> Optional[
                 )
             except OSError:
                 pass
+        # Clientes Steam recientes también conservan arte en config/librarycache.
+        config_cache = steam_root / 'config' / 'librarycache'
+        if config_cache.is_dir():
+            candidates.extend(_candidate_images(config_cache / appid, recursive=True, limit=64))
+            try:
+                candidates.extend(
+                    p for p in list(config_cache.glob(f'{appid}_*'))[:64]
+                    if p.is_file() and p.suffix.lower() in _ARTWORK_EXTENSIONS
+                )
+            except OSError:
+                pass
         best = _best_artwork(candidates)
         if best:
             return best
@@ -620,7 +1210,7 @@ def discover_local_game_artwork(exe_path: str | os.PathLike | None) -> Optional[
     candidates = []
     if root and root.is_dir():
         candidates.extend(_candidate_images(root, recursive=False, limit=48))
-        for folder_name in ('assets', 'art', 'artwork', 'images', 'media', 'resources'):
+        for folder_name in ('assets', 'art', 'artwork', 'images', 'media', 'resources', 'splash', 'branding'):
             folder = root / folder_name
             candidates.extend(_candidate_images(folder, recursive=True, limit=48))
         # Sin una palabra que denote portada/banner no aceptamos una imagen local
@@ -632,6 +1222,10 @@ def discover_local_game_artwork(exe_path: str | os.PathLike | None) -> Optional[
         best = _best_artwork(candidates)
         if best:
             return best
+
+    other = discover_other_launcher_artwork(raw, title_hint=title_hint, source_hint=source_hint)
+    if other is not None:
+        return other
     return None
 
 
@@ -690,10 +1284,13 @@ def load_game_artwork(
     exe_path: str | os.PathLike | None,
     size: tuple[int, int] = (320, 180),
     override_path: str | os.PathLike | None = None,
+    *,
+    title_hint: str | None = None,
+    source_hint: str | None = None,
 ) -> tuple[Image.Image, str, str]:
     """Devuelve ``(imagen, fuente, ruta)`` para la tarjeta del juego.
 
-    ``fuente`` es ``CUSTOM``, ``NVIDIA_APP``, ``LOCAL`` o ``FALLBACK``. La ruta queda vacía en
+    ``fuente`` identifica el origen local (CUSTOM/STEAM_LOCAL/EPIC_LOCAL/RIOT_LOCAL/NVIDIA_APP/LOCAL). La ruta queda vacía en
     fallback, respetando REAL_OR_NA y evitando afirmar una portada inexistente.
     """
     chosen = None
@@ -702,13 +1299,25 @@ def load_game_artwork(
         chosen = Path(os.fspath(override_path)).expanduser()
         source = 'CUSTOM'
     if chosen is None:
-        chosen = discover_nvidia_app_artwork(exe_path)
+        # Primero el launcher/instalación real del juego. Esto evita que Steam sea
+        # la única tienda con carátulas fiables y permite Epic/Riot sin hardcodes.
+        chosen = discover_local_game_artwork(
+            exe_path, title_hint=title_hint, source_hint=source_hint,
+        )
+        if chosen is not None:
+            source_key = str(source_hint or '').upper().strip()
+            if source_key == 'EPIC' or _epic_manifest_for_exe(Path(str(exe_path or '')))[0] is not None:
+                source = 'EPIC_LOCAL'
+            elif source_key == 'RIOT' or any(x in _normalized_path_text(exe_path).casefold() for x in ('riot games', 'valorant', 'league of legends')):
+                source = 'RIOT_LOCAL'
+            elif _steam_context(exe_path)[0]:
+                source = 'STEAM_LOCAL'
+            else:
+                source = 'LOCAL'
+    if chosen is None:
+        chosen = discover_nvidia_app_artwork(exe_path, title_hint=title_hint)
         if chosen is not None:
             source = 'NVIDIA_APP'
-    if chosen is None:
-        chosen = discover_local_game_artwork(exe_path)
-        if chosen is not None:
-            source = 'LOCAL'
     if chosen is not None:
         try:
             with Image.open(chosen) as image:

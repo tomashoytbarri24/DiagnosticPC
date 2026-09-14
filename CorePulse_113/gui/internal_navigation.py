@@ -18,6 +18,7 @@ BG = theme_color('#06111f')
 
 PAGE_BUTTONS = {
     'dashboard': '_btn_summary',
+    'benchmark': 'btn_benchmark',
     'gaming': 'btn_health_center',
     'overlay': 'btn_health_center',
     'diagnostic': 'btn_diagnostic',
@@ -37,6 +38,7 @@ PAGE_BUTTONS = {
 }
 
 PAGE_PANEL_REFS = {
+    'benchmark': 'benchmark_panel',
     'gaming': 'gaming_panel',
     'overlay': 'overlay_config_panel',
     'diagnostic': 'diagnostic_experience_panel',
@@ -56,9 +58,10 @@ PAGE_PANEL_REFS = {
 }
 
 PANEL_REFS = tuple(PAGE_PANEL_REFS.values())
-CACHEABLE_PAGES = {'gaming', 'diagnostic', 'health_center', 'cleanup', 'tweaks', 'network', 'alerts', 'trends', 'history', 'themes', 'cpu_details', 'ram_details', 'gpu_details', 'storage_details'}
+CACHEABLE_PAGES = {'benchmark', 'gaming', 'diagnostic', 'health_center', 'cleanup', 'tweaks', 'network', 'alerts', 'trends', 'history', 'themes', 'cpu_details', 'ram_details', 'gpu_details', 'storage_details'}
 
 PAGE_LABELS = {
+    'benchmark': 'Benchmark',
     'gaming': 'Gaming',
     'diagnostic': 'Diagnóstico',
     'health_center': 'Centro de salud',

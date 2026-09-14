@@ -233,6 +233,7 @@ class App(ctk.CTk):
         self.overlay_config_window = None
         self.overlay_config_panel = None
         self.gaming_panel = None
+        self.benchmark_panel = None
         self.overlay_hotkey_manager = GlobalHotkeyManager(callback=self._on_overlay_hotkey)
         self._minimized_to_tray = False
         self.latest_telemetry = None
@@ -324,6 +325,7 @@ class App(ctk.CTk):
         self.lbl_health_status = ctk.CTkLabel(self.card_health_sidebar, text='Evaluando...', font=('Segoe UI', 10, 'bold'), text_color=theme_color('#f8fafc'))
         self.lbl_health_status.pack(anchor='w', padx=12, pady=(0, 10))
         self.btn_overlay = ctk.CTkButton(self.sidebar, text='Gaming', fg_color='transparent', hover_color=theme_color('#14253b'), text_color=theme_color('#f4f7fb'), font=('Segoe UI', 11, 'bold'), height=34, corner_radius=8, command=self.open_gaming)
+        self.btn_benchmark = ctk.CTkButton(self.sidebar, text='Benchmark', fg_color='transparent', hover_color=theme_color('#14253b'), text_color=theme_color('#f4f7fb'), font=('Segoe UI', 11, 'bold'), height=34, corner_radius=8, command=self.open_benchmark)
         self.btn_diagnostic = ctk.CTkButton(self.sidebar, text='Iniciar diagnóstico', fg_color='transparent', hover_color=theme_color('#14253b'), text_color=theme_color('#f4f7fb'), font=('Segoe UI', 11, 'bold'), height=34, corner_radius=8, command=self.start_diagnostic_session)
         self.btn_health_center = ctk.CTkButton(self.sidebar, text='Centro de salud', fg_color='transparent', hover_color=theme_color('#14253b'), text_color=theme_color('#f4f7fb'), font=('Segoe UI', 11, 'bold'), height=34, corner_radius=8, command=self.open_health_center)
         self.btn_pdf = ctk.CTkButton(self.sidebar, text='Reportes', fg_color='transparent', hover_color=theme_color('#14253b'), text_color=theme_color('#66788f'), font=('Segoe UI', 11, 'bold'), height=34, corner_radius=8, command=self.export_pdf_report, state='disabled')
@@ -960,6 +962,31 @@ class App(ctk.CTk):
             self.windows_tweaks_panel = None
             abort_internal_page(self, 'tweaks', host)
             cp_error(self, 'Tweaks de Windows 11', f'No se pudo abrir la vista de Tweaks:\n\n{exc}')
+
+    def open_benchmark(self):
+        """Abre el benchmark visual como módulo principal independiente."""
+        if not self.is_running:
+            return
+        if not self._services_ready:
+            cp_info(self, 'Benchmark', 'CorePulse está terminando de iniciar los servicios de monitoreo. Intenta nuevamente en un momento.')
+            return
+        host = None
+        try:
+            host, reused = activate_internal_page(self, 'benchmark')
+            if reused and self.benchmark_panel is not None:
+                self._defer_ui_call(self.benchmark_panel.refresh)
+                return
+            if host is None:
+                return
+            from gui.benchmark_panel import BenchmarkPanel
+            panel = BenchmarkPanel(self, host)
+            self.benchmark_panel = panel
+            if not commit_internal_page(self, 'benchmark', host, panel):
+                self.benchmark_panel = None
+        except Exception as exc:
+            self.benchmark_panel = None
+            abort_internal_page(self, 'benchmark', host)
+            cp_error(self, 'Benchmark', f'No se pudo abrir el Benchmark:\n\n{exc}')
 
     def open_health_center(self):
         """Abre el Centro de Salud avanzado como página interna."""

@@ -32,7 +32,7 @@ SIDEBAR_ACTIVE_BORDER = theme_color('#17658f')
 SIDEBAR_INACTIVE_TEXT = theme_color('#c2ccda')
 RESIZE_DEBOUNCE_MS = 85
 FULLSCREEN_SETTLE_MS = 420
-NAV = {'_btn_summary': 'Resumen', 'btn_diagnostic': 'Iniciar diagnóstico', 'btn_health_center': 'Centro de salud', 'btn_cleanup': 'Limpieza de sistema', 'btn_tweaks': 'Tweaks Windows 11', 'btn_network': 'Red avanzada', 'btn_smart_alerts': 'Alertas y diagnóstico', 'btn_session_trends': 'Tendencias', 'btn_alert_history': 'Historial de alertas', '_theme_toggle_button': 'Temas'}
+NAV = {'_btn_summary': 'Resumen', 'btn_benchmark': 'Benchmark', 'btn_diagnostic': 'Iniciar diagnóstico', 'btn_health_center': 'Centro de salud', 'btn_cleanup': 'Limpieza de sistema', 'btn_tweaks': 'Tweaks Windows 11', 'btn_network': 'Red avanzada', 'btn_smart_alerts': 'Alertas y diagnóstico', 'btn_session_trends': 'Tendencias', 'btn_alert_history': 'Historial de alertas', '_theme_toggle_button': 'Temas'}
 
 def _cfg(w, **kw):
     if w is None:

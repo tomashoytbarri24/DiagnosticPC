@@ -1,4 +1,4 @@
-"""Centro de Salud avanzado: batería, throttling, benchmarks, Windows, historial y rollback."""
+"""Centro de Salud avanzado: batería, throttling, benchmark 3D, Windows, historial y rollback."""
 from __future__ import annotations
 
 import copy
@@ -17,8 +17,7 @@ from PIL import Image, ImageTk, ImageDraw
 
 from core.theme_manager import color as theme_color
 from core.battery_health import collect_battery_health, probe_battery_presence
-from core.benchmark_engine import run_benchmark_suite, benchmark_profile_info
-from core.benchmark_presentation import benchmark_card_data, benchmark_delta_data, benchmark_component_conclusion, benchmark_overall_summary
+from core.visual_benchmark import run_visual_benchmark, visual_profile_info
 from core.before_after import capture_metrics, save_snapshot, load_snapshots, compare
 from core.device_identity import collect_hardware_inventory
 from core.windows_commands import is_admin, request_elevation, looks_like_access_denied
@@ -89,17 +88,44 @@ def _benchmark_live_metrics(telemetry):
         return None
 
     gpu_temp = first_number(tele.get('gpu_temp'))
+    gpu_hotspot = first_number(tele.get('gpu_hotspot'))
     gpu_usage = first_number(tele.get('gpu_usage'))
-    if gpu_temp is None or gpu_usage is None:
-        for gpu in gpus:
-            if not isinstance(gpu, dict):
+    gpu_vram_used_mb = None
+    gpu_vram_usage_percent = None
+    gpu_temp_limit = None
+    gpu_hotspot_limit = None
+    for gpu in gpus:
+        if not isinstance(gpu, dict):
+            continue
+        if gpu_temp is None:
+            gpu_temp = first_number(gpu.get('temperature_c'), gpu.get('hotspot_c'))
+        if gpu_hotspot is None:
+            gpu_hotspot = first_number(gpu.get('hotspot_c'))
+        if gpu_usage is None:
+            gpu_usage = first_number(gpu.get('usage_percent'))
+        if gpu_vram_used_mb is None:
+            gpu_vram_used_mb = first_number(gpu.get('memory_used_mb'))
+        if gpu_vram_usage_percent is None:
+            gpu_vram_usage_percent = first_number(gpu.get('memory_usage_percent'))
+        sensor_rows = gpu.get('sensors') if isinstance(gpu.get('sensors'), list) else []
+        for row in sensor_rows:
+            if not isinstance(row, dict):
                 continue
-            if gpu_temp is None:
-                gpu_temp = first_number(gpu.get('temperature_c'), gpu.get('hotspot_c'))
-            if gpu_usage is None:
-                gpu_usage = first_number(gpu.get('usage_percent'))
-            if gpu_temp is not None and gpu_usage is not None:
-                break
+            name = str(row.get('name') or row.get('sensor_name') or '').casefold()
+            sensor_type = str(row.get('type') or row.get('sensor_type') or '').casefold()
+            value = first_number(row.get('value'))
+            if value is None or not (20.0 <= value <= 150.0):
+                continue
+            is_temp_limit = (
+                ('limit' in name or 'critical' in name)
+                and ('temp' in name or 'thermal' in name or sensor_type == 'temperature')
+            )
+            if not is_temp_limit:
+                continue
+            if 'hot' in name and gpu_hotspot_limit is None:
+                gpu_hotspot_limit = value
+            elif gpu_temp_limit is None:
+                gpu_temp_limit = value
 
     # Temperatura CPU: primero usa aliases certificados; si el modelo concreto
     # no publica Package como alias, inspecciona el inventario real de sensores
@@ -144,40 +170,22 @@ def _benchmark_live_metrics(telemetry):
 
     return {
         'cpu_temp': cpu_temp,
+        'cpu_tjmax_distance': first_number(
+            cpu.get('distance_to_tjmax_min_c'), tele.get('cpu_distance_to_tjmax_min_c'),
+            tele.get('distance_to_tjmax_min_c')
+        ),
         'cpu_ghz': cpu_ghz,
         'cpu_usage': first_number(tele.get('cpu_usage'), cpu.get('total_load_percent')),
         'ram_usage': first_number(tele.get('ram_usage')),
         'gpu_temp': gpu_temp,
+        'gpu_hotspot': gpu_hotspot,
+        'gpu_temp_limit': gpu_temp_limit,
+        'gpu_hotspot_limit': gpu_hotspot_limit,
         'gpu_usage': gpu_usage,
+        'gpu_vram_used_mb': gpu_vram_used_mb,
+        'gpu_vram_usage_percent': gpu_vram_usage_percent,
     }
 
-
-def _benchmark_observation_fallback(key, suite):
-    """Presenta min/promedio/máximo muestreado si antes/después no existe."""
-    summary = suite.get('telemetry_summary') if isinstance(suite, dict) else {}
-    row = summary.get(key) if isinstance(summary, dict) else None
-    if not isinstance(row, dict):
-        return None
-    lo = _num(row.get('min')); avg = _num(row.get('avg')); hi = _num(row.get('max'))
-    if lo is None and avg is None and hi is None:
-        return None
-    meta = {
-        'cpu_temp': ('Temperatura del CPU', '°C', 1),
-        'cpu_ghz': ('Velocidad del CPU', 'GHz', 2),
-        'ram_usage': ('Uso de memoria RAM', '%', 1),
-        'gpu_temp': ('Temperatura de la GPU', '°C', 1),
-    }
-    label, unit, digits = meta.get(key, (key, '', 1))
-    vals = [v for v in (lo, avg, hi) if v is not None]
-    value = f"{min(vals):.{digits}f} {unit} → {max(vals):.{digits}f} {unit}".replace('  ', ' ')
-    change = f"Promedio {avg:.{digits}f} {unit} · Pico {max(vals):.{digits}f} {unit} durante el benchmark.".replace('  ', ' ') if avg is not None else 'Lecturas reales observadas durante el benchmark.'
-    tone = 'cyan'
-    peak = max(vals)
-    if key in {'cpu_temp', 'gpu_temp'} and peak >= 90:
-        tone = 'red'
-    elif key in {'cpu_temp', 'gpu_temp'} and peak >= 80:
-        tone = 'amber'
-    return {'label': label, 'value': value, 'change': change, 'tone': tone}
 
 
 def _game_source_label(value):
@@ -286,9 +294,9 @@ class HealthCenterPanel:
         ('history', 'Historial'), ('recovery', 'Recuperación'),
     )
 
-    def __init__(self, app, host, *, performance_only=False, external_scroll=None):
-        self.app = app; self.host = host; self._alive = True; self._visible = True; self._performance_only = bool(performance_only); self._external_scroll = external_scroll; self._tab='performance' if self._performance_only else 'summary'; self._jobs=set()
-        self._battery=None; self._startup=None; self._services=None; self._crashes=None; self._drivers=None; self._hw=None; self._restore=None; self._bench=None
+    def __init__(self, app, host, *, performance_only=False, external_scroll=None, benchmark_only=False):
+        self.app = app; self.host = host; self._alive = True; self._visible = True; self._performance_only = bool(performance_only); self._benchmark_only = bool(benchmark_only); self._external_scroll = external_scroll; self._tab='performance' if self._performance_only else 'summary'; self._jobs=set()
+        self._battery=None; self._startup=None; self._services=None; self._crashes=None; self._drivers=None; self._hw=None; self._restore=None
         self._seed_preloaded_battery_state()
         self._repair_diagnostic=None; self._repair_result=None; self._repair_progress=None; self.lbl_repair_progress=None
         self.btn_repair_diag=None; self.btn_repair_fix=None; self.repair_progress_bar=None
@@ -300,20 +308,20 @@ class HealthCenterPanel:
         self._game_artwork_worker = None
         self._game_placeholder_cache = {}
         self._game_action_popup = None
-        self._bench_compare = None
-        self._benchmark_progress = 0.0
-        self._benchmark_stage = 'Listo para iniciar'
-        self._benchmark_detail = 'Elige duración y componentes antes de iniciar.'
-        self._benchmark_profile_key = 'standard'
-        self._benchmark_component_flags = {'cpu': True, 'ram': True, 'ssd': True, 'gpu': True}
+        # Benchmark principal de CorePulse: siempre usa la carga máxima definida.
+        self._benchmark_profile_key = 'extended'
         self._benchmark_profile_var = None
-        self._benchmark_component_vars = {}
-        self._benchmark_selection_label = None
-        self.bench_progress_bar = None
-        self.lbl_bench_progress = None
+        self._visual_bench = None
+        self._visual_benchmark_progress = 0.0
+        self._visual_benchmark_stage = 'Listo para iniciar'
+        self._visual_benchmark_detail = 'La prueba abrirá una escena 3D real en una ventana separada.'
+        self.btn_visual_bench = None
+        self.visual_bench_progress_bar = None
+        self.lbl_visual_bench_progress = None
+        self.lbl_visual_bench_detail = None
         self._performance_after_id = None
         self._last_performance_generation = None
-        self._performance_section = 'home'
+        self._performance_section = 'benchmark' if self._benchmark_only else 'home'
         self._game_library_filter = 'all'
         # V0.10.2.81w — Servicios de Windows se muestran completos mediante
         # paginación para no crear cientos de widgets en un único frame.
@@ -349,7 +357,7 @@ class HealthCenterPanel:
             self.frame.after_idle(self.refresh)
         except Exception:
             self.refresh()
-        if self._performance_only:
+        if self._performance_only and not self._benchmark_only:
             self._schedule_performance_status_tick()
 
     def _seed_preloaded_battery_state(self):
@@ -1149,7 +1157,7 @@ class HealthCenterPanel:
             ),
             (
                 'Rendimiento',
-                'Throttling, benchmark, perfiles de energía y herramientas Gaming.',
+                'Throttling, perfiles de energía y herramientas Gaming.',
                 _state_label(throttle_state), throttle_color,
                 lambda: getattr(self.app, 'open_gaming', lambda *_: None)('performance')
             ),
@@ -1181,7 +1189,7 @@ class HealthCenterPanel:
 
         primary = ctk.CTkFrame(self.body, fg_color='transparent')
         primary.pack(fill='x', padx=8, pady=(2, 8))
-        for idx in range(4):
+        for idx in range(3):
             primary.grid_columnconfigure(idx, weight=1, uniform='battery_primary')
         self._battery_summary_card(
             primary, 0, 'Salud', _fmt(health, '%'),
@@ -1249,7 +1257,10 @@ class HealthCenterPanel:
 
 
     def _render_performance(self):
-        """Gaming mantiene una jerarquía corta: Inicio / Biblioteca / Estabilidad / Overlay."""
+        """Rendimiento Gaming o benchmark standalone, según el host activo."""
+        if self._benchmark_only:
+            self._render_gaming_benchmark_section()
+            return
         if not self._performance_only:
             self._title(
                 'Rendimiento y throttling térmico',
@@ -1265,14 +1276,6 @@ class HealthCenterPanel:
             self._render_gaming_library_section()
         elif section == 'stability':
             self._render_gaming_stability_section()
-        elif section == 'benchmark':
-            self._render_gaming_detail_header(
-                'Benchmark',
-                'Prueba local para comparar este mismo PC entre ejecuciones.',
-                back_section='stability',
-                back_text='Volver a Estabilidad',
-            )
-            self._render_gaming_benchmark_section()
         elif section == 'boost':
             self._render_gaming_detail_header(
                 'Game Boost',
@@ -1622,9 +1625,6 @@ class HealthCenterPanel:
         cpu = throttle.get('cpu') or {}
         throttle_state = str(cpu.get('state') or 'NO_EVIDENCE').upper()
         throttle_color = RED if throttle_state == 'CONFIRMED' else AMBER if throttle_state in ('SUSPECTED', 'WATCHING') else GREEN
-        bench_text = 'En curso…' if 'benchmark' in self._jobs else ('Disponible' if self._bench else 'Sin ejecutar')
-        bench_color = AMBER if 'benchmark' in self._jobs else (CYAN if self._bench else MUTED)
-
         shell = ctk.CTkFrame(self.body, fg_color='transparent')
         shell.pack(fill='x', padx=8, pady=(3, 10))
         for idx in range(4):
@@ -1634,7 +1634,6 @@ class HealthCenterPanel:
             ('home', 'Inicio', 'Perfil, Game Boost y estado actual', f'{_profile_label(status.get("requested_mode"))}', CYAN),
             ('library', 'Biblioteca', 'Juegos registrados y portada', f'{len(registered)} juego' + ('' if len(registered) == 1 else 's'), GREEN),
             ('stability', 'Estabilidad', 'Throttling y evidencia térmica', _state_label(throttle_state), throttle_color),
-            ('benchmark', 'Benchmark', 'Pruebas rápidas y resultados', bench_text, bench_color),
         )
         for idx, (key, title, detail, value, accent) in enumerate(specs):
             active = key == self._performance_section
@@ -1665,7 +1664,7 @@ class HealthCenterPanel:
 
     def _select_performance_section(self, key):
         key = str(key or 'home').strip().lower()
-        if key not in ('home', 'library', 'stability', 'benchmark', 'boost'):
+        if key not in ('home', 'library', 'stability', 'boost'):
             key = 'home'
         self._performance_section = key
         self._render()
@@ -1675,7 +1674,7 @@ class HealthCenterPanel:
         ctk.CTkLabel(card, text='Accesos rápidos', font=(FONT, 12, 'bold'), text_color=TEXT).pack(anchor='w', padx=14, pady=(11, 2))
         ctk.CTkLabel(
             card,
-            text='La portada Gaming ahora concentra sólo el control principal. Biblioteca, estabilidad y benchmark quedan en vistas dedicadas para evitar sobrecarga visual.',
+            text='La portada Gaming concentra sólo el control principal. Biblioteca y estabilidad quedan en vistas dedicadas para evitar sobrecarga visual.',
             font=(FONT, 9), text_color=MUTED, anchor='w', justify='left', wraplength=1040
         ).pack(fill='x', padx=14, pady=(0, 8))
         row = ctk.CTkFrame(card, fg_color='transparent')
@@ -1683,7 +1682,6 @@ class HealthCenterPanel:
         for idx, (title, detail, _accent, key) in enumerate((
             ('Biblioteca', 'Gestiona juegos detectados y manuales.', GREEN, 'library'),
             ('Estabilidad', 'Revisa evidencia de throttling sin mezclarla con la biblioteca.', AMBER, 'stability'),
-            ('Benchmark', 'Ejecuta y consulta resultados en una vista aparte.', PURPLE, 'benchmark'),
         )):
             row.grid_columnconfigure(idx, weight=1, uniform='gaming_home_shortcuts')
             box = ctk.CTkFrame(row, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=9)
@@ -1693,7 +1691,7 @@ class HealthCenterPanel:
             self._button(box, 'Abrir', lambda k=key: self._select_performance_section(k), variant='ghost', height=28).pack(fill='x', padx=9, pady=(0, 9))
 
     def _render_gaming_stability_section(self):
-        """Vista compacta de estabilidad: estado actual + evidencia + benchmark."""
+        """Vista compacta de estabilidad Gaming: estado actual + evidencia térmica."""
         live = self._gaming_live_snapshot()
         state = live.get('state') or {}
         th = getattr(self.app, 'thermal_throttling_state', {}) or {}
@@ -1759,253 +1757,322 @@ class HealthCenterPanel:
                 font=(FONT, 9), text_color=MUTED, anchor='w'
             ).pack(fill='x', padx=14, pady=(0, 10))
 
-        benchmark = ctk.CTkFrame(
-            self.body, fg_color=theme_color('#0d1728'), border_width=1,
-            border_color=BORDER, corner_radius=11
-        )
-        benchmark.pack(fill='x', padx=8, pady=(0, 9))
-        info = ctk.CTkFrame(benchmark, fg_color='transparent')
-        info.pack(side='left', fill='x', expand=True, padx=14, pady=11)
-        ctk.CTkLabel(info, text='Benchmark del sistema', font=(FONT, 12, 'bold'), text_color=TEXT, anchor='w').pack(anchor='w')
-        if 'benchmark' in self._jobs:
-            bench_status = f"{int(self._benchmark_progress * 100)}% · {self._benchmark_stage}"
-            bench_color = AMBER
-        elif self._bench:
-            bench_status = 'Resultado disponible'
-            bench_color = GREEN
-        else:
-            bench_status = 'Aún no ejecutado'
-            bench_color = MUTED
-        ctk.CTkLabel(info, text=bench_status, font=(FONT, 9, 'bold'), text_color=bench_color, anchor='w').pack(anchor='w', pady=(3, 0))
-        if 'benchmark' in self._jobs:
-            btn = self._button(benchmark, 'En ejecución…', lambda: None, variant='ghost', height=31, width=122)
-            try: btn.configure(state='disabled')
-            except Exception: pass
-        elif self._bench:
-            btn = self._button(
-                benchmark, 'Ver resultado',
-                lambda: self._select_performance_section('benchmark'),
-                variant='ghost', height=31, width=122
-            )
-        else:
-            btn = self._button(
-                benchmark, 'Configurar',
-                lambda: self._select_performance_section('benchmark'),
-                variant='primary', height=31, width=122
-            )
-        self.btn_bench = btn
-        btn.pack(side='right', padx=13, pady=12)
 
     def _benchmark_profile_label(self):
-        return benchmark_profile_info(self._benchmark_profile_key).get('label') or 'Estándar'
-
-    def _benchmark_selected_components(self):
-        selected = []
-        for key in ('cpu', 'ram', 'ssd', 'gpu'):
-            var = self._benchmark_component_vars.get(key)
-            if var is not None:
-                try:
-                    self._benchmark_component_flags[key] = bool(var.get())
-                except Exception:
-                    pass
-            if self._benchmark_component_flags.get(key, False):
-                selected.append(key)
-        return selected
-
-    def _benchmark_selection_text(self):
-        info = benchmark_profile_info(self._benchmark_profile_key)
-        selected = self._benchmark_selected_components()
-        names = ' · '.join(key.upper() for key in selected) if selected else 'Ningún componente seleccionado'
-        return f"{info['label']} {info['duration_label']} · {names}"
+        return visual_profile_info(self._benchmark_profile_key).get('label') or 'Extendido'
 
     def _on_benchmark_profile_change(self, label):
-        mapping = {'Rápido': 'quick', 'Estándar': 'standard', 'Extendido': 'extended'}
-        self._benchmark_profile_key = mapping.get(str(label), 'standard')
+        # Se conserva por compatibilidad, pero el benchmark visible usa solo el perfil extendido.
+        self._benchmark_profile_key = 'extended'
+        # El benchmark 3D usa el perfil directamente; no hay selector de
+        # componentes legacy que sincronizar.
         try:
-            if self._benchmark_selection_label is not None and self._benchmark_selection_label.winfo_exists():
-                self._benchmark_selection_label.configure(text=self._benchmark_selection_text(), text_color=TEXT2)
-        except Exception:
-            pass
-        self._refresh_benchmark_action_state()
-
-    def _on_benchmark_component_change(self, key):
-        var = self._benchmark_component_vars.get(key)
-        if var is not None:
-            try:
-                self._benchmark_component_flags[key] = bool(var.get())
-            except Exception:
-                pass
-        try:
-            if self._benchmark_selection_label is not None and self._benchmark_selection_label.winfo_exists():
-                selected = self._benchmark_selected_components()
-                self._benchmark_selection_label.configure(
-                    text=self._benchmark_selection_text(),
-                    text_color=TEXT2 if selected else AMBER,
-                )
-        except Exception:
-            pass
-        self._refresh_benchmark_action_state()
-
-    def _refresh_benchmark_action_state(self):
-        """Habilita ejecutar sólo cuando la configuración previa es válida."""
-        btn = getattr(self, 'btn_bench', None)
-        if btn is None:
-            return
-        try:
-            if 'benchmark' in self._jobs:
-                btn.configure(text='Benchmark en ejecución…', state='disabled')
-                return
-            selected = self._benchmark_selected_components()
-            btn.configure(
-                text='Ejecutar benchmark' if not self._bench else 'Ejecutar nuevamente',
-                state='normal' if selected else 'disabled',
-            )
+            self._render()
         except Exception:
             pass
 
     def _render_gaming_benchmark_section(self):
-        bench = self._card(); bench.pack(fill='x', padx=8, pady=(3, 7))
-        bench_head = ctk.CTkFrame(bench, fg_color='transparent')
-        bench_head.pack(fill='x', padx=14, pady=(12, 9))
-        info = ctk.CTkFrame(bench_head, fg_color='transparent')
+        """Único benchmark visible de CorePulse: escena 3D reproducible."""
+        bench = self._card()
+        bench.pack(fill='x', padx=8, pady=(3, 7))
+
+        head = ctk.CTkFrame(bench, fg_color='transparent')
+        head.pack(fill='x', padx=14, pady=(12, 8))
+        info = ctk.CTkFrame(head, fg_color='transparent')
         info.pack(side='left', fill='x', expand=True)
-        ctk.CTkLabel(info, text='Benchmark del sistema', font=(FONT, 13, 'bold'), text_color=TEXT, anchor='w').pack(anchor='w')
+        ctk.CTkLabel(info, text='Benchmark visual de hardware', font=(FONT, 13, 'bold'), text_color=TEXT, anchor='w').pack(anchor='w')
         ctk.CTkLabel(
             info,
-            text='Primero configuras la prueba. CorePulse sólo comienza cuando confirmas el perfil y los componentes.',
-            font=(FONT, 9), text_color=MUTED, anchor='w', justify='left'
+            text='Prueba visual por áreas: GPU (geometría, fill, texturas/VRAM, shaders y compute), CPU multinúcleo, ancho de banda RAM y carga combinada. Cada fase usa mediciones reales.',
+            font=(FONT, 9), text_color=MUTED, anchor='w', justify='left', wraplength=900,
         ).pack(anchor='w', pady=(2, 0))
-        bench_running = 'benchmark' in self._jobs
 
-        chooser = ctk.CTkFrame(bench, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=11)
-        chooser.pack(fill='x', padx=12, pady=(0, 10))
-
-        step1 = ctk.CTkFrame(chooser, fg_color='transparent')
-        step1.pack(fill='x', padx=12, pady=(11, 6))
+        profile_shell = ctk.CTkFrame(bench, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=10)
+        profile_shell.pack(fill='x', padx=12, pady=(0, 10))
+        profile_head = ctk.CTkFrame(profile_shell, fg_color='transparent')
+        profile_head.pack(fill='x', padx=12, pady=(10, 6))
+        ctk.CTkLabel(profile_head, text='Modo de ejecución', font=(FONT, 10, 'bold'), text_color=TEXT2).pack(side='left')
+        profile = visual_profile_info('extended')
         ctk.CTkLabel(
-            step1, text='1', width=24, height=24, corner_radius=12,
-            fg_color=theme_color('#164f7d'), text_color=TEXT, font=(FONT, 9, 'bold')
-        ).pack(side='left')
-        ctk.CTkLabel(step1, text='Elige el tipo de prueba', font=(FONT, 10, 'bold'), text_color=TEXT2).pack(side='left', padx=(8, 0))
-        ctk.CTkLabel(
-            step1, text='Rápido = comprobación · Estándar = equilibrio · Extendido = carga sostenida',
-            font=(FONT, 8), text_color=MUTED
+            profile_head,
+            text=f"Benchmark completo · {profile['width']}×{profile['height']} · {profile['seconds']:.0f} s medidos · 8 áreas + warm-up",
+            font=(FONT, 8), text_color=MUTED,
         ).pack(side='right')
+        ctk.CTkLabel(
+            profile_shell,
+            text='CorePulse ejecuta directamente el benchmark completo en perfil extendido para exigir la GPU al máximo bajo una carga reproducible. No se ofrecen perfiles reducidos en la experiencia principal.',
+            font=(FONT, 8), text_color=MUTED, anchor='w', justify='left', wraplength=1020,
+        ).pack(fill='x', padx=12, pady=(0, 11))
 
-        if self._benchmark_profile_var is None:
-            self._benchmark_profile_var = ctk.StringVar(value=self._benchmark_profile_label())
-        else:
-            try:
-                self._benchmark_profile_var.set(self._benchmark_profile_label())
-            except Exception:
-                pass
-        profile_selector = ctk.CTkSegmentedButton(
-            chooser, values=['Rápido', 'Estándar', 'Extendido'], variable=self._benchmark_profile_var,
-            command=self._on_benchmark_profile_change, height=36,
-            selected_color=theme_color('#164f7d'), selected_hover_color=theme_color('#1b5c8f'),
-            unselected_color=theme_color('#0b1726'), unselected_hover_color=theme_color('#102840')
-        )
-        profile_selector.pack(fill='x', padx=12, pady=(0, 12))
+        self._render_visual_benchmark_card(bench)
+
+        note = ctk.CTkFrame(bench, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=8)
+        note.pack(fill='x', padx=12, pady=(0, 10))
+        ctk.CTkLabel(
+            note,
+            text='Benchmark independiente y reproducible. Mide 8 áreas reales: geometría, fill, texturas/VRAM, shaders GLSL, compute/GPGPU, CPU multinúcleo, ancho de banda RAM y carga combinada. Ray Tracing seguirá en N/A hasta implementar una carga real; nunca se simula.',
+            font=(FONT, 8), text_color=MUTED, anchor='w', justify='left', wraplength=1020,
+        ).pack(fill='x', padx=12, pady=9)
+
+    def _format_visual_metric(self, value, suffix='', digits=1):
         try:
-            profile_selector.configure(state='disabled' if bench_running else 'normal')
+            if value is None:
+                return 'N/A'
+            return f"{float(value):.{int(digits)}f}{suffix}"
+        except Exception:
+            return 'N/A'
+
+    def _set_visual_benchmark_progress(self, fraction, stage, detail=''):
+        try:
+            self._visual_benchmark_progress = max(0.0, min(1.0, float(fraction)))
+        except Exception:
+            self._visual_benchmark_progress = 0.0
+        self._visual_benchmark_stage = str(stage or 'Benchmark visual 3D')
+        self._visual_benchmark_detail = str(detail or '')
+        try:
+            if self.visual_bench_progress_bar is not None and self.visual_bench_progress_bar.winfo_exists():
+                self.visual_bench_progress_bar.set(self._visual_benchmark_progress)
+        except Exception:
+            pass
+        try:
+            if self.lbl_visual_bench_progress is not None and self.lbl_visual_bench_progress.winfo_exists():
+                self.lbl_visual_bench_progress.configure(
+                    text=f"{int(self._visual_benchmark_progress * 100)}% · {self._visual_benchmark_stage}",
+                    text_color=PURPLE,
+                )
+        except Exception:
+            pass
+        try:
+            if self.lbl_visual_bench_detail is not None and self.lbl_visual_bench_detail.winfo_exists():
+                self.lbl_visual_bench_detail.configure(text=self._visual_benchmark_detail)
         except Exception:
             pass
 
-        divider = ctk.CTkFrame(chooser, fg_color=BORDER, height=1)
-        divider.pack(fill='x', padx=12, pady=(0, 10))
+    def _render_visual_benchmark_card(self, parent):
+        running = 'visual_benchmark' in self._jobs
+        profile = visual_profile_info(self._benchmark_profile_key)
+        shell = ctk.CTkFrame(parent, fg_color=theme_color('#091827'), border_width=1, border_color=theme_color('#3a285c'), corner_radius=10)
+        shell.pack(fill='x', padx=12, pady=(0, 10))
 
-        step2 = ctk.CTkFrame(chooser, fg_color='transparent')
-        step2.pack(fill='x', padx=12, pady=(0, 6))
+        head = ctk.CTkFrame(shell, fg_color='transparent')
+        head.pack(fill='x', padx=12, pady=(10, 6))
+        info = ctk.CTkFrame(head, fg_color='transparent')
+        info.pack(side='left', fill='x', expand=True)
+        ctk.CTkLabel(info, text='Benchmark por áreas', font=(FONT, 11, 'bold'), text_color=PURPLE, anchor='w').pack(anchor='w')
         ctk.CTkLabel(
-            step2, text='2', width=24, height=24, corner_radius=12,
-            fg_color=theme_color('#164f7d'), text_color=TEXT, font=(FONT, 9, 'bold')
-        ).pack(side='left')
-        ctk.CTkLabel(step2, text='Selecciona qué componentes medir', font=(FONT, 10, 'bold'), text_color=TEXT2).pack(side='left', padx=(8, 0))
-        ctk.CTkLabel(step2, text='Puedes elegir uno, varios o todos.', font=(FONT, 8), text_color=MUTED).pack(side='right')
+            info,
+            text=f"8 áreas de hardware · {profile['width']}×{profile['height']} · benchmark completo ({profile['label']})",
+            font=(FONT, 8), text_color=MUTED, anchor='w', justify='left'
+        ).pack(anchor='w', pady=(2, 0))
 
-        comp_row = ctk.CTkFrame(chooser, fg_color='transparent')
-        comp_row.pack(fill='x', padx=8, pady=(0, 10))
-        component_meta = {
-            'cpu': ('CPU', '1 hilo + multinúcleo'),
-            'ram': ('RAM', 'Ancho de banda sostenido'),
-            'ssd': ('SSD', 'Lectura + escritura'),
-            'gpu': ('GPU', 'Carga gráfica OpenGL'),
-        }
-        for col, key in enumerate(('cpu', 'ram', 'ssd', 'gpu')):
-            comp_row.grid_columnconfigure(col, weight=1, uniform='bench_components')
-            if key not in self._benchmark_component_vars:
-                self._benchmark_component_vars[key] = ctk.BooleanVar(value=bool(self._benchmark_component_flags.get(key, True)))
-            card = ctk.CTkFrame(comp_row, fg_color=theme_color('#0b1726'), border_width=1, border_color=BORDER, corner_radius=9)
-            card.grid(row=0, column=col, sticky='nsew', padx=4)
-            top = ctk.CTkFrame(card, fg_color='transparent'); top.pack(fill='x', padx=9, pady=(8, 2))
-            ctk.CTkLabel(top, text=component_meta[key][0], font=(FONT, 9, 'bold'), text_color=TEXT).pack(side='left')
-            switch = ctk.CTkSwitch(
-                top, text='', width=38, variable=self._benchmark_component_vars[key],
-                command=lambda k=key: self._on_benchmark_component_change(k), progress_color=CYAN
-            )
-            switch.pack(side='right')
-            try:
-                switch.configure(state='disabled' if bench_running else 'normal')
-            except Exception:
-                pass
-            ctk.CTkLabel(card, text=component_meta[key][1], font=(FONT, 7), text_color=MUTED, anchor='w', justify='left').pack(fill='x', padx=9, pady=(0, 8))
-
-        confirm = ctk.CTkFrame(chooser, fg_color=theme_color('#091827'), border_width=1, border_color=BORDER, corner_radius=9)
-        confirm.pack(fill='x', padx=12, pady=(0, 11))
-        confirm_text = ctk.CTkFrame(confirm, fg_color='transparent')
-        confirm_text.pack(side='left', fill='x', expand=True, padx=11, pady=9)
-        ctk.CTkLabel(confirm_text, text='Configuración lista', font=(FONT, 9, 'bold'), text_color=TEXT2, anchor='w').pack(anchor='w')
-        self._benchmark_selection_label = ctk.CTkLabel(
-            confirm_text, text=self._benchmark_selection_text(), font=(FONT, 8, 'bold'),
-            text_color=TEXT2 if self._benchmark_selected_components() else AMBER, anchor='w'
+        self.btn_visual_bench = self._button(
+            head,
+            'En ejecución…' if running else ('Ejecutar benchmark de nuevo' if self._visual_bench else 'Ejecutar benchmark'),
+            self._run_visual_benchmark,
+            variant='ghost', height=34, width=145,
         )
-        self._benchmark_selection_label.pack(anchor='w', pady=(2, 0))
+        self.btn_visual_bench.pack(side='right', padx=(10, 0))
+        try:
+            self.btn_visual_bench.configure(state='disabled' if 'visual_benchmark' in self._jobs else 'normal')
+        except Exception:
+            pass
 
-        self.btn_bench = self._button(
-            confirm,
-            'Benchmark en ejecución…' if bench_running else ('Ejecutar nuevamente' if self._bench else 'Ejecutar benchmark'),
-            self._run_benchmark, variant='primary', height=36, width=165
+        progress_row = ctk.CTkFrame(shell, fg_color='transparent')
+        progress_row.pack(fill='x', padx=12, pady=(0, 4))
+        self.lbl_visual_bench_progress = ctk.CTkLabel(
+            progress_row,
+            text=(f"{int(self._visual_benchmark_progress * 100)}% · {self._visual_benchmark_stage}" if running else 'Geometría · Fill · Texturas/VRAM · Shaders · Compute · CPU · RAM · Combinada · REAL_FPS_OR_NA_ONLY'),
+            font=(FONT, 8, 'bold'), text_color=PURPLE if running else TEXT2, anchor='w'
         )
-        self.btn_bench.pack(side='right', padx=11, pady=9)
-        self._refresh_benchmark_action_state()
+        self.lbl_visual_bench_progress.pack(side='left', fill='x', expand=True)
+        ctk.CTkLabel(progress_row, text='X para cancelar · protección por límites térmicos reales', font=(FONT, 7), text_color=MUTED).pack(side='right')
 
-        progress_shell = ctk.CTkFrame(bench, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=8)
-        progress_shell.pack(fill='x', padx=12, pady=(0, 10))
-        progress_top = ctk.CTkFrame(progress_shell, fg_color='transparent')
-        progress_top.pack(fill='x', padx=12, pady=(9, 4))
-        self.lbl_bench_progress = ctk.CTkLabel(
-            progress_top,
-            text=(f"{int(self._benchmark_progress * 100)}% · {self._benchmark_stage}" if bench_running else 'Esperando confirmación'),
-            font=(FONT, 9, 'bold'), text_color=CYAN if bench_running else TEXT2, anchor='w'
-        )
-        self.lbl_bench_progress.pack(side='left', fill='x', expand=True)
-        ctk.CTkLabel(
-            progress_top, text='Carga real · protección térmica activa', font=(FONT, 8), text_color=MUTED
-        ).pack(side='right')
-        self.bench_progress_bar = ctk.CTkProgressBar(
-            progress_shell, height=7, corner_radius=999, progress_color=CYAN,
+        self.visual_bench_progress_bar = ctk.CTkProgressBar(
+            shell, height=6, corner_radius=999, progress_color=PURPLE,
             fg_color=theme_color('#132741')
         )
-        self.bench_progress_bar.pack(fill='x', padx=12, pady=(0, 5))
-        self.bench_progress_bar.set(self._benchmark_progress if bench_running else (1.0 if self._bench else 0.0))
-        self.lbl_bench_progress_detail = ctk.CTkLabel(
-            progress_shell,
-            text=(self._benchmark_detail if bench_running else 'Configura arriba y pulsa Ejecutar benchmark cuando estés listo.'),
+        self.visual_bench_progress_bar.pack(fill='x', padx=12, pady=(0, 5))
+        self.visual_bench_progress_bar.set(self._visual_benchmark_progress if running else (1.0 if self._visual_bench else 0.0))
+        self.lbl_visual_bench_detail = ctk.CTkLabel(
+            shell,
+            text=(self._visual_benchmark_detail if running else 'Abre una ventana visual independiente, muestra FPS reales en cada fase y ejecuta ocho áreas en secuencia; CPU y RAM usan cargas host reales mientras CorePulse registra sensores en paralelo.'),
             font=(FONT, 8), text_color=MUTED, anchor='w', justify='left'
         )
-        self.lbl_bench_progress_detail.pack(fill='x', padx=12, pady=(0, 9))
+        self.lbl_visual_bench_detail.pack(fill='x', padx=12, pady=(0, 9))
 
-        if self._bench:
-            self._render_benchmark_results()
-        else:
-            empty = ctk.CTkFrame(bench, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=8)
-            empty.pack(fill='x', padx=12, pady=(0, 10))
-            ctk.CTkLabel(empty, text='Aún no hay una prueba ejecutada en esta sesión.', font=(FONT, 10, 'bold'), text_color=TEXT2, anchor='w').pack(fill='x', padx=12, pady=(10, 2))
-            ctk.CTkLabel(
-                empty,
-                text='Primero selecciona perfil y componentes. Nada se ejecuta automáticamente al entrar a esta vista.',
-                font=(FONT, 8), text_color=MUTED, anchor='w', justify='left', wraplength=1020
-            ).pack(fill='x', padx=12, pady=(0, 10))
+        result = self._visual_bench if isinstance(self._visual_bench, dict) else None
+        if result:
+            status = str(result.get('status') or '').upper()
+            if status in ('ERROR', 'UNAVAILABLE'):
+                ctk.CTkLabel(
+                    shell, text=f"No evaluable: {result.get('reason') or 'la prueba visual no pudo completarse'}",
+                    font=(FONT, 8, 'bold'), text_color=AMBER, anchor='w', justify='left'
+                ).pack(fill='x', padx=12, pady=(0, 10))
+            else:
+                if status in ('SAFETY_STOP', 'CANCELLED', 'PARTIAL'):
+                    prefix = {
+                        'SAFETY_STOP': 'Prueba detenida por seguridad',
+                        'CANCELLED': 'Prueba cancelada',
+                        'PARTIAL': 'Resultado parcial',
+                    }.get(status, status)
+                    ctk.CTkLabel(
+                        shell, text=f"{prefix}: {result.get('reason') or 'resultado incompleto'}",
+                        font=(FONT, 8, 'bold'), text_color=AMBER, anchor='w', justify='left', wraplength=980
+                    ).pack(fill='x', padx=12, pady=(0, 8))
+                metrics = ctk.CTkFrame(shell, fg_color='transparent')
+                metrics.pack(fill='x', padx=8, pady=(0, 9))
+                telemetry = result.get('telemetry') if isinstance(result.get('telemetry'), dict) else {}
+                gpu_temp = ((telemetry.get('gpu_temp') or {}).get('max') if isinstance(telemetry.get('gpu_temp'), dict) else None)
+                gpu_usage = ((telemetry.get('gpu_usage') or {}).get('max') if isinstance(telemetry.get('gpu_usage'), dict) else None)
+                cpu_temp = ((telemetry.get('cpu_temp') or {}).get('max') if isinstance(telemetry.get('cpu_temp'), dict) else None)
+                vram_used = ((telemetry.get('gpu_vram_used_mb') or {}).get('max') if isinstance(telemetry.get('gpu_vram_used_mb'), dict) else None)
+                cpu_bench = result.get('cpu_benchmark') if isinstance(result.get('cpu_benchmark'), dict) else {}
+                ram_bench = result.get('ram_benchmark') if isinstance(result.get('ram_benchmark'), dict) else {}
+                rows = (
+                    ('FPS combinado', self._format_visual_metric(result.get('frames_per_s'), ' FPS', 1)),
+                    ('1% Low', self._format_visual_metric(result.get('one_percent_low_fps'), ' FPS', 1)),
+                    ('Frametime', self._format_visual_metric(result.get('frametime_avg_ms'), ' ms', 2)),
+                    ('Uso GPU máx.', self._format_visual_metric(gpu_usage, '%', 1)),
+                    ('CPU SHA-256', self._format_visual_metric(cpu_bench.get('sha256_mb_s'), ' MB/s', 1)),
+                    ('RAM copia', self._format_visual_metric(ram_bench.get('copy_gb_s'), ' GB/s', 2)),
+                    ('GPU temp. máx.', self._format_visual_metric(gpu_temp, ' °C', 1)),
+                    ('CPU temp. máx.', self._format_visual_metric(cpu_temp, ' °C', 1)),
+                )
+                for index, (label, value) in enumerate(rows):
+                    row, col = divmod(index, 4)
+                    metrics.grid_columnconfigure(col, weight=1, uniform='visual_bench_metrics')
+                    cell = ctk.CTkFrame(metrics, fg_color=theme_color('#0b1726'), border_width=1, border_color=BORDER, corner_radius=8)
+                    cell.grid(row=row, column=col, sticky='nsew', padx=4, pady=4)
+                    ctk.CTkLabel(cell, text=label, font=(FONT, 7, 'bold'), text_color=MUTED).pack(anchor='w', padx=9, pady=(7, 1))
+                    ctk.CTkLabel(cell, text=value, font=(FONT, 11, 'bold'), text_color=TEXT).pack(anchor='w', padx=9, pady=(0, 7))
+                phases = result.get('phases') if isinstance(result.get('phases'), list) else []
+                if phases:
+                    ctk.CTkLabel(
+                        shell, text='Resultado por área', font=(FONT, 9, 'bold'),
+                        text_color=TEXT2, anchor='w'
+                    ).pack(fill='x', padx=12, pady=(1, 4))
+                    phase_grid = ctk.CTkFrame(shell, fg_color='transparent')
+                    phase_grid.pack(fill='x', padx=8, pady=(0, 8))
+                    for col in range(3):
+                        phase_grid.grid_columnconfigure(col, weight=1, uniform='visual_phase_results')
+                    for index, phase in enumerate(phases[:8]):
+                        if not isinstance(phase, dict):
+                            continue
+                        row, col = divmod(index, 3)
+                        cell = ctk.CTkFrame(
+                            phase_grid, fg_color=theme_color('#0b1726'),
+                            border_width=1, border_color=BORDER, corner_radius=8
+                        )
+                        cell.grid(row=row, column=col, sticky='nsew', padx=4, pady=3)
+                        ctk.CTkLabel(
+                            cell, text=str(phase.get('label') or phase.get('key') or 'Fase'),
+                            font=(FONT, 8, 'bold'), text_color=PURPLE, anchor='w'
+                        ).pack(fill='x', padx=9, pady=(7, 1))
+                        phase_key = str(phase.get('key') or '')
+                        workload = phase.get('workload') if isinstance(phase.get('workload'), dict) else {}
+                        if phase_key == 'cpu':
+                            primary_text = self._format_visual_metric(workload.get('sha256_mb_s'), ' MB/s', 1)
+                            workers = int(_num(workload.get('workers')) or 0)
+                            phase_detail = (
+                                f'SHA-256 multinúcleo · {workers} hilos · FPS visual {self._format_visual_metric(phase.get("frames_per_s"), "", 1)}'
+                                if str(phase.get('status') or '').upper() == 'OK'
+                                else _short(phase.get('reason') or 'No evaluable', 52)
+                            )
+                        elif phase_key == 'ram':
+                            primary_text = self._format_visual_metric(workload.get('copy_gb_s'), ' GB/s', 2)
+                            phase_detail = (
+                                f'Copia RAM · {self._format_visual_metric(workload.get("working_set_mb"), " MB", 0)} de trabajo · FPS visual {self._format_visual_metric(phase.get("frames_per_s"), "", 1)}'
+                                if str(phase.get('status') or '').upper() == 'OK'
+                                else _short(phase.get('reason') or 'No evaluable', 52)
+                            )
+                        else:
+                            primary_text = self._format_visual_metric(phase.get('frames_per_s'), ' FPS', 1)
+                            low = self._format_visual_metric(phase.get('one_percent_low_fps'), ' FPS', 1)
+                            ft = self._format_visual_metric(phase.get('frametime_avg_ms'), ' ms', 2)
+                            phase_detail = (
+                                f'1% Low {low} · {ft}'
+                                if str(phase.get('status') or '').upper() == 'OK'
+                                else _short(phase.get('reason') or 'No evaluable', 52)
+                            )
+                        ctk.CTkLabel(
+                            cell, text=primary_text,
+                            font=(FONT, 13, 'bold'), text_color=TEXT, anchor='w'
+                        ).pack(fill='x', padx=9)
+                        ctk.CTkLabel(
+                            cell, text=phase_detail,
+                            font=(FONT, 7), text_color=MUTED, anchor='w'
+                        ).pack(fill='x', padx=9, pady=(1, 7))
+
+                quality = str(result.get('measurement_quality') or 'VALID')
+                vsync_text = 'VSync desactivado' if result.get('vsync_disabled') is True else 'VSync no confirmado'
+                vram_text = self._format_visual_metric(vram_used / 1024.0 if _num(vram_used) is not None else None, ' GB VRAM máx.', 2)
+                ctk.CTkLabel(
+                    shell,
+                    text=f"{result.get('renderer') or 'GPU N/A'} · {result.get('resolution') or 'N/A'} · {vram_text} · {vsync_text} · {quality}",
+                    font=(FONT, 7), text_color=MUTED, anchor='w'
+                ).pack(fill='x', padx=12, pady=(0, 9))
+
+    def _run_visual_benchmark(self):
+        if 'visual_benchmark' in self._jobs:
+            return
+        profile_key = 'extended'
+        self._benchmark_profile_key = 'extended'
+        profile = visual_profile_info(profile_key)
+        self._visual_benchmark_progress = 0.0
+        self._visual_benchmark_stage = 'Preparando benchmark por áreas'
+        self._visual_benchmark_detail = f"Benchmark completo · {profile['width']}×{profile['height']} · 8 áreas de hardware reales"
+        self._set_visual_benchmark_progress(0.01, self._visual_benchmark_stage, self._visual_benchmark_detail)
+
+        def progress(fraction, stage, detail=''):
+            try:
+                self.app.after(0, lambda f=fraction, s=stage, d=detail: self._set_visual_benchmark_progress(f, s, d))
+            except Exception:
+                pass
+
+        def telemetry_sample():
+            tele = copy.deepcopy(getattr(self.app, 'latest_telemetry', {}) or {})
+            return _benchmark_live_metrics(tele)
+
+        def work():
+            return run_visual_benchmark(
+                profile_key,
+                progress_callback=progress,
+                telemetry_sampler=telemetry_sample,
+            )
+
+        def done(result, error):
+            if isinstance(result, dict):
+                self._visual_bench = result
+            else:
+                self._visual_bench = {
+                    'kind': 'GPU_VISUAL', 'value': None, 'unit': 'FPS', 'provider': 'CorePulse OpenGL 3D visible',
+                    'status': 'ERROR', 'reason': error or 'La prueba visual no devolvió un resultado válido.'
+                }
+            status = str((self._visual_bench or {}).get('status') or '').upper()
+            if status == 'OK':
+                self._visual_benchmark_stage = 'Benchmark por áreas completado'
+                self._visual_benchmark_detail = 'Geometría, fill, texturas/VRAM, shaders, compute y carga combinada medidas con FPS y frametimes reales.'
+            elif status == 'PARTIAL':
+                self._visual_benchmark_stage = 'Benchmark completado parcialmente'
+                self._visual_benchmark_detail = str((self._visual_bench or {}).get('reason') or 'Una fase opcional quedó N/A; el resto conserva mediciones reales.')
+            elif status == 'CANCELLED':
+                self._visual_benchmark_stage = 'Benchmark visual cancelado'
+                self._visual_benchmark_detail = str((self._visual_bench or {}).get('reason') or 'Prueba cancelada por el usuario.')
+            elif status == 'SAFETY_STOP':
+                self._visual_benchmark_stage = 'Detenido por seguridad térmica'
+                self._visual_benchmark_detail = str((self._visual_bench or {}).get('reason') or 'CorePulse detuvo la prueba por temperatura.')
+            else:
+                self._visual_benchmark_stage = 'Benchmark visual no evaluable'
+                self._visual_benchmark_detail = str((self._visual_bench or {}).get('reason') or error or 'No se obtuvo un resultado válido.')
+            self._visual_benchmark_progress = 1.0
+            store = getattr(self.app, 'health_history_store', None)
+            if store and isinstance(self._visual_bench, dict):
+                try:
+                    store.record_benchmark(self._visual_bench)
+                except Exception:
+                    pass
+
+        self._async('visual_benchmark', work, done)
 
     def _render_gaming_library_section(self):
         manager = getattr(self.app, 'performance_manager', None)
@@ -2074,187 +2141,6 @@ class HealthCenterPanel:
             return
         self._game_library_filter = key
         self._render()
-
-    def _benchmark_tone_color(self, tone):
-        return {
-            'green': GREEN, 'cyan': CYAN, 'purple': PURPLE, 'amber': AMBER,
-            'red': RED, 'muted': MUTED,
-        }.get(str(tone or '').lower(), TEXT2)
-
-    def _render_benchmark_results(self):
-        """Resumen visual del benchmark con lenguaje simple y detalles en segundo plano."""
-        suite = self._bench if isinstance(self._bench, dict) else {}
-        if suite.get('error'):
-            card = self._card(); card.pack(fill='x', padx=8, pady=5)
-            ctk.CTkLabel(card, text='Benchmark no completado', font=(FONT, 13, 'bold'), text_color=AMBER).pack(anchor='w', padx=14, pady=(11, 3))
-            ctk.CTkLabel(
-                card, text=_short(suite.get('error'), 180), font=(FONT, 9), text_color=TEXT2,
-                anchor='w', justify='left', wraplength=1030
-            ).pack(fill='x', padx=14, pady=(0, 11))
-            return
-
-        overall, overall_detail, overall_tone, statuses = benchmark_overall_summary(suite)
-        overall_color = self._benchmark_tone_color(overall_tone)
-        compare_data = self._bench_compare if isinstance(self._bench_compare, dict) else {}
-
-        summary = self._card(); summary.pack(fill='x', padx=8, pady=(5, 7))
-        ctk.CTkLabel(summary, text='Resumen del benchmark', font=(FONT, 13, 'bold'), text_color=TEXT).pack(anchor='w', padx=14, pady=(11, 2))
-        ctk.CTkLabel(summary, text=overall, font=(FONT, 20, 'bold'), text_color=overall_color).pack(anchor='w', padx=14, pady=(0, 2))
-        ctk.CTkLabel(
-            summary, text=overall_detail, font=(FONT, 9), text_color=TEXT2,
-            anchor='w', justify='left', wraplength=1040
-        ).pack(fill='x', padx=14, pady=(0, 8))
-
-        status_row = ctk.CTkFrame(summary, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=7)
-        status_row.pack(fill='x', padx=12, pady=(0, 10))
-        for i, key in enumerate(('cpu', 'ram', 'ssd', 'gpu')):
-            status_row.grid_columnconfigure(i, weight=1, uniform='benchmark_summary_status')
-            data = statuses[key]
-            block = ctk.CTkFrame(status_row, fg_color='transparent')
-            block.grid(row=0, column=i, sticky='ew', padx=8, pady=8)
-            ctk.CTkLabel(block, text=data['title'], font=(FONT, 9, 'bold'), text_color=TEXT2).pack(anchor='w')
-            ctk.CTkLabel(
-                block, text=data.get('short_status') or data['status'], font=(FONT, 10, 'bold'),
-                text_color=self._benchmark_tone_color(data.get('tone'))
-            ).pack(anchor='w', pady=(1, 0))
-
-        duration_total = suite.get('duration_s')
-        profile = str(suite.get('profile') or '')
-        if duration_total is not None:
-            ctk.CTkLabel(
-                summary,
-                text=f"Duración total: {float(duration_total):.1f} s · Perfil: {'Estándar sostenido' if profile == 'STANDARD_SUSTAINED' else profile or 'Local'}",
-                font=(FONT, 8, 'bold'), text_color=CYAN, anchor='w'
-            ).pack(fill='x', padx=14, pady=(0, 6))
-
-        telemetry_summary = suite.get('telemetry_summary') if isinstance(suite.get('telemetry_summary'), dict) else {}
-        if telemetry_summary:
-            thermal = ctk.CTkFrame(summary, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=7)
-            thermal.pack(fill='x', padx=12, pady=(0, 9))
-            ctk.CTkLabel(thermal, text='Durante la carga', font=(FONT, 8, 'bold'), text_color=MUTED).pack(anchor='w', padx=10, pady=(7, 3))
-            metrics = []
-            cpu_temp = telemetry_summary.get('cpu_temp') or {}
-            gpu_temp = telemetry_summary.get('gpu_temp') or {}
-            cpu_usage = telemetry_summary.get('cpu_usage') or {}
-            gpu_usage = telemetry_summary.get('gpu_usage') or {}
-            if cpu_temp.get('max') is not None: metrics.append(f"CPU máx {cpu_temp['max']:.1f} °C")
-            if cpu_usage.get('max') is not None: metrics.append(f"CPU uso máx {cpu_usage['max']:.0f}%")
-            if gpu_temp.get('max') is not None: metrics.append(f"GPU máx {gpu_temp['max']:.1f} °C")
-            if gpu_usage.get('max') is not None: metrics.append(f"GPU uso máx {gpu_usage['max']:.0f}%")
-            samples = int(telemetry_summary.get('sample_count') or 0)
-            metrics.append(f'{samples} muestras térmicas')
-            ctk.CTkLabel(
-                thermal, text='  ·  '.join(metrics), font=(FONT, 9, 'bold'), text_color=TEXT2,
-                anchor='w', justify='left', wraplength=1030
-            ).pack(fill='x', padx=10, pady=(0, 7))
-            if telemetry_summary.get('safety_stop'):
-                ctk.CTkLabel(
-                    thermal, text=str(telemetry_summary.get('safety_stop')), font=(FONT, 9, 'bold'), text_color=RED,
-                    anchor='w', justify='left'
-                ).pack(fill='x', padx=10, pady=(0, 7))
-
-        ctk.CTkLabel(
-            summary,
-            text='Los valores sirven principalmente para comparar este mismo PC entre ejecuciones. CorePulse no inventa rankings ni sustituye datos ausentes.',
-            font=(FONT, 8), text_color=MUTED, anchor='w', justify='left', wraplength=1040
-        ).pack(fill='x', padx=14, pady=(0, 10))
-
-        grid = ctk.CTkFrame(self.body, fg_color='transparent')
-        grid.pack(fill='x', padx=3, pady=(0, 4))
-        for col in range(2):
-            grid.grid_columnconfigure(col, weight=1, uniform='benchmark_result_cards')
-
-        for index, key in enumerate(('cpu', 'ram', 'ssd', 'gpu')):
-            data = statuses[key]
-            conclusion, conclusion_tone = benchmark_component_conclusion(key, suite, compare_data)
-            card = self._card(grid)
-            card.grid(row=index // 2, column=index % 2, sticky='nsew', padx=5, pady=5)
-            card.grid_columnconfigure(0, weight=1)
-
-            top = ctk.CTkFrame(card, fg_color='transparent')
-            top.pack(fill='x', padx=14, pady=(11, 1))
-            ctk.CTkLabel(top, text=data['title'], font=(FONT, 14, 'bold'), text_color=TEXT).pack(side='left')
-            badge = ctk.CTkFrame(top, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=6)
-            badge.pack(side='right')
-            ctk.CTkLabel(
-                badge, text=data.get('short_status') or data['status'], font=(FONT, 8, 'bold'),
-                text_color=self._benchmark_tone_color(data.get('tone'))
-            ).pack(padx=8, pady=3)
-
-            ctk.CTkLabel(
-                card, text=data['subtitle'], font=(FONT, 9), text_color=MUTED,
-                anchor='w', justify='left'
-            ).pack(fill='x', padx=14, pady=(0, 7))
-
-            ctk.CTkLabel(
-                card, text=data.get('display_headline') or data['headline'], font=(FONT, 19, 'bold'), text_color=self._benchmark_tone_color(data.get('tone')),
-                anchor='w', justify='left', wraplength=480
-            ).pack(fill='x', padx=14, pady=(0, 2))
-            if data.get('display_secondary') or data.get('secondary'):
-                ctk.CTkLabel(
-                    card, text=data.get('display_secondary') or data['secondary'], font=(FONT, 10, 'bold'), text_color=TEXT2,
-                    anchor='w', justify='left', wraplength=480
-                ).pack(fill='x', padx=14, pady=(0, 8))
-
-            insight = ctk.CTkFrame(card, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=7)
-            insight.pack(fill='x', padx=12, pady=(0, 7))
-            ctk.CTkLabel(
-                insight, text='Qué significa', font=(FONT, 8, 'bold'), text_color=MUTED,
-                anchor='w'
-            ).pack(fill='x', padx=10, pady=(7, 1))
-            ctk.CTkLabel(
-                insight, text=data.get('meaning') or data.get('interpretation') or '', font=(FONT, 9), text_color=TEXT2,
-                anchor='w', justify='left', wraplength=455
-            ).pack(fill='x', padx=10, pady=(0, 6))
-
-            ctk.CTkLabel(
-                card, text=conclusion, font=(FONT, 9, 'bold'), text_color=self._benchmark_tone_color(conclusion_tone),
-                anchor='w', justify='left', wraplength=480
-            ).pack(fill='x', padx=14, pady=(0, 5))
-            if data.get('technical_detail'):
-                ctk.CTkLabel(
-                    card, text=f"Detalle: {data['technical_detail']}", font=(FONT, 8), text_color=MUTED,
-                    anchor='w', justify='left', wraplength=480
-                ).pack(fill='x', padx=14, pady=(0, 10))
-
-        if isinstance(self._bench_compare, dict) and self._bench_compare.get('available'):
-            compare_card = self._card(); compare_card.pack(fill='x', padx=8, pady=(5, 8))
-            ctk.CTkLabel(compare_card, text='Qué cambió durante la prueba', font=(FONT, 12, 'bold'), text_color=TEXT).pack(anchor='w', padx=14, pady=(11, 2))
-            ctk.CTkLabel(
-                compare_card,
-                text='Comparamos una lectura justo antes con otra al terminar. No son máximos/mínimos del benchmark y por sí solas no diagnostican throttling.',
-                font=(FONT, 9), text_color=MUTED, anchor='w', justify='left', wraplength=1040
-            ).pack(fill='x', padx=14, pady=(0, 6))
-            deltas = self._bench_compare.get('deltas') or {}
-            for key in ('cpu_temp', 'cpu_ghz', 'ram_usage', 'gpu_temp'):
-                info = benchmark_delta_data(key, deltas.get(key) or {})
-                if info.get('value') == 'N/A':
-                    observed = _benchmark_observation_fallback(key, self._bench or {})
-                    if observed is not None:
-                        info = observed
-                row = ctk.CTkFrame(compare_card, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=6)
-                row.pack(fill='x', padx=12, pady=3)
-                row.grid_columnconfigure(1, weight=1)
-                ctk.CTkLabel(
-                    row, text=info['label'], font=(FONT, 9, 'bold'), text_color=TEXT2,
-                    anchor='w', width=190
-                ).grid(row=0, column=0, rowspan=2, sticky='nw', padx=(10, 12), pady=8)
-                ctk.CTkLabel(
-                    row, text=info['value'], font=(FONT, 10, 'bold'), text_color=TEXT,
-                    anchor='w', justify='left'
-                ).grid(row=0, column=1, sticky='ew', padx=(0, 10), pady=(7, 0))
-                ctk.CTkLabel(
-                    row, text=info['change'], font=(FONT, 9), text_color=self._benchmark_tone_color(info.get('tone')),
-                    anchor='w', justify='left', wraplength=760
-                ).grid(row=1, column=1, sticky='ew', padx=(0, 10), pady=(0, 7))
-        elif self._bench:
-            note = self._card(); note.pack(fill='x', padx=8, pady=(5, 8))
-            ctk.CTkLabel(note, text='Cambios durante la prueba', font=(FONT, 11, 'bold'), text_color=TEXT).pack(anchor='w', padx=14, pady=(10, 2))
-            ctk.CTkLabel(
-                note, text='No hubo telemetría suficiente para comparar una lectura antes y otra al finalizar. CorePulse muestra N/A en lugar de estimar valores.',
-                font=(FONT, 9), text_color=MUTED, anchor='w', justify='left', wraplength=1040
-            ).pack(fill='x', padx=14, pady=(0, 10))
-
 
     def _render_performance_profiles(self, include_library=True):
         manager = getattr(self.app, 'performance_manager', None)
@@ -2413,14 +2299,17 @@ class HealthCenterPanel:
         return status
 
     def _game_artwork_for(self, game, size=(304, 171)):
-        path = str((game or {}).get('exe') or '').strip()
+        path = str((game or {}).get('exe') or (game or {}).get('name') or '').strip()
         override = str((game or {}).get('artwork_override') or '').strip()
         identity = str((game or {}).get('name') or '').strip().lower()
-        key = (identity, path.lower(), override.lower(), tuple(size))
+        title_hint = str((game or {}).get('display_name') or '').strip()
+        source_hint = str((game or {}).get('source') or '').strip().upper()
+        key = (identity, path.lower(), override.lower(), title_hint.casefold(), source_hint, tuple(size))
         pil = self._game_artwork_cache.get(key)
         if pil is None:
             pil, source, resolved_path = load_game_artwork(
                 path, size=size, override_path=override or None,
+                title_hint=title_hint or None, source_hint=source_hint or None,
             )
             self._game_artwork_cache[key] = (pil, source, resolved_path)
         else:
@@ -2451,7 +2340,9 @@ class HealthCenterPanel:
             columns = 1
 
         card_width = int((usable - gap * (columns - 1)) // columns)
-        card_width = max(286, min(360, card_width))
+        # No capamos a 360: al hacerlo, tres cards podían sobrepasar/recortarse
+        # con escalado DPI de Windows. El grid reparte el ancho real por igual.
+        card_width = max(270, min(520, card_width))
         art_width = card_width
         art_height = int(round(art_width * 9 / 16))
         return columns, card_width, (art_width, art_height)
@@ -2546,7 +2437,10 @@ class HealthCenterPanel:
                     return
                 key = job['key']
                 try:
-                    payload = load_game_artwork(job['path'], size=job['size'], override_path=job['override'] or None)
+                    payload = load_game_artwork(
+                        job['path'], size=job['size'], override_path=job['override'] or None,
+                        title_hint=job.get('title_hint') or None, source_hint=job.get('source_hint') or None,
+                    )
                 except Exception:
                     logger.debug('[GAME_UI] No se pudo cargar portada en background: %s', job['path'], exc_info=True)
                     continue
@@ -2604,8 +2498,7 @@ class HealthCenterPanel:
             action('Cambiar imagen', lambda g=dict(game): self._choose_game_artwork(g))
             if game.get('artwork_override'):
                 action('Usar imagen automática', lambda exe=game.get('name'): self._clear_game_artwork(exe))
-            if game.get('manual'):
-                action('Quitar de biblioteca', lambda exe=game.get('name'): self._remove_manual_game(exe))
+            action('Quitar de biblioteca', lambda g=dict(game): self._remove_game_from_library(g))
             self._button(shell, 'Cerrar', self._close_game_actions, variant='ghost', height=28).pack(fill='x', padx=7, pady=(4, 7))
             popup.update_idletasks()
             width = 220
@@ -2685,26 +2578,26 @@ class HealthCenterPanel:
         columns, card_width, art_size = self._game_library_geometry()
         gap = 14
         artwork_jobs = []
-        row_inner = None
+        for col in range(columns):
+            library.grid_columnconfigure(col, weight=1, uniform='game_library_cards')
 
         for index, game in enumerate(registered):
-            if index % columns == 0:
-                row_frame = ctk.CTkFrame(library, fg_color='transparent')
-                row_frame.pack(fill='x', pady=(0, gap))
-                row_inner = ctk.CTkFrame(row_frame, fg_color='transparent')
-                row_inner.pack(anchor='w')
-
+            row, col = divmod(index, columns)
             active = bool(game.get('active'))
             excluded = bool(game.get('excluded'))
             manual = bool(game.get('manual'))
             border = GREEN if active else (AMBER if excluded else theme_color('#26354d'))
             card = ctk.CTkFrame(
-                row_inner, width=card_width, height=art_size[1] + 80,
+                library, width=card_width, height=art_size[1] + 82,
                 fg_color=theme_color('#111d2e'), border_width=1,
                 border_color=border, corner_radius=10,
             )
-            is_row_end = ((index + 1) % columns == 0) or (index == len(registered) - 1)
-            card.pack(side='left', anchor='n', padx=(0, 0 if is_row_end else gap))
+            # Grid uniforme: cada card de una fila recibe exactamente el mismo
+            # ancho disponible. Evita que la tercera quede recortada por DPI.
+            left_pad = 0 if col == 0 else gap // 2
+            right_pad = 0 if col == columns - 1 else gap // 2
+            card.grid(row=row, column=col, sticky='nsew', padx=(left_pad, right_pad), pady=(0, gap))
+            card.grid_propagate(False)
             card.pack_propagate(False)
 
             art_host = ctk.CTkFrame(
@@ -2719,10 +2612,12 @@ class HealthCenterPanel:
             )
             art_label.pack(fill='both', expand=True)
 
-            path = str((game or {}).get('exe') or '').strip()
+            path = str((game or {}).get('exe') or (game or {}).get('name') or '').strip()
             override = str((game or {}).get('artwork_override') or '').strip()
             identity = str((game or {}).get('name') or '').strip().lower()
-            key = (identity, path.lower(), override.lower(), tuple(art_size))
+            title_hint = str((game or {}).get('display_name') or '').strip()
+            source_hint = str((game or {}).get('source') or '').strip().upper()
+            key = (identity, path.lower(), override.lower(), title_hint.casefold(), source_hint, tuple(art_size))
             cached = self._game_artwork_cache.get(key)
             if cached is not None:
                 try:
@@ -2736,6 +2631,7 @@ class HealthCenterPanel:
                 art_label.configure(image=self._placeholder_game_image(art_size))
                 artwork_jobs.append({
                     'key': key, 'path': path, 'override': override,
+                    'title_hint': title_hint, 'source_hint': source_hint,
                     'size': art_size, 'label': art_label,
                 })
 
@@ -2764,6 +2660,16 @@ class HealthCenterPanel:
             )
             name.pack(side='left', fill='x', expand=True)
 
+            remove_btn = self._button(
+                name_row, 'Eliminar', lambda g=dict(game): self._remove_game_from_library(g),
+                variant='ghost', width=62, height=25,
+            )
+            remove_btn.configure(
+                border_width=0, corner_radius=6, font=(FONT, 8, 'bold'),
+                hover_color=theme_color('#55202a'), text_color=theme_color('#f87171'),
+            )
+            remove_btn.pack(side='right', padx=(5, 0))
+
             menu_btn = self._button(name_row, '⋯', lambda: None, variant='ghost', width=32, height=25)
             menu_btn.configure(
                 command=lambda g=dict(game), b=menu_btn: self._show_game_actions(g, b),
@@ -2788,7 +2694,7 @@ class HealthCenterPanel:
             ).pack(side='right')
 
             self._bind_game_card_hover(
-                (card, art_host, art_label, body, name_row, name, meta_row),
+                (card, art_host, art_label, body, name_row, name, remove_btn, meta_row),
                 card, action_widget=menu_btn, active=active, excluded=excluded
             )
 
@@ -2818,6 +2724,22 @@ class HealthCenterPanel:
         if detector is None or not hasattr(detector, 'clear_game_artwork'):
             return
         if detector.clear_game_artwork(exe_name):
+            self._game_artwork_cache.clear()
+            self._render()
+
+    def _remove_game_from_library(self, game):
+        detector = getattr(self.app, 'game_detector', None)
+        if detector is None or not hasattr(detector, 'remove_game_from_library'):
+            return
+        game = dict(game or {})
+        exe_name = game.get('name')
+        title = str(game.get('display_name') or exe_name or 'este juego')
+        if not messagebox.askyesno(
+            'CorePulse · Biblioteca',
+            f'¿Quitar {title} de la biblioteca de CorePulse?\n\nNo se desinstalará el juego ni se borrarán archivos del disco.'
+        ):
+            return
+        if detector.remove_game_from_library(exe_name):
             self._game_artwork_cache.clear()
             self._render()
 
@@ -3979,99 +3901,6 @@ class HealthCenterPanel:
                 self._stability_page = 0
         self._async(name, fn, done)
 
-    def _set_benchmark_progress(self, fraction, stage, detail=''):
-        try:
-            fraction = max(0.0, min(1.0, float(fraction)))
-        except Exception:
-            fraction = 0.0
-        self._benchmark_progress = fraction
-        self._benchmark_stage = str(stage or 'Benchmark en ejecución')
-        self._benchmark_detail = str(detail or '')
-        try:
-            if self.bench_progress_bar is not None and self.bench_progress_bar.winfo_exists():
-                self.bench_progress_bar.set(fraction)
-        except Exception:
-            pass
-        try:
-            if self.lbl_bench_progress is not None and self.lbl_bench_progress.winfo_exists():
-                self.lbl_bench_progress.configure(text=f"{int(fraction * 100)}% · {self._benchmark_stage}", text_color=CYAN)
-        except Exception:
-            pass
-        try:
-            label = getattr(self, 'lbl_bench_progress_detail', None)
-            if label is not None and label.winfo_exists():
-                label.configure(text=self._benchmark_detail)
-        except Exception:
-            pass
-
-    def _run_benchmark(self):
-        if 'benchmark' in self._jobs:
-            return
-        selected = self._benchmark_selected_components()
-        if not selected:
-            self._benchmark_stage = 'Selecciona componentes'
-            self._benchmark_detail = 'Activa al menos CPU, RAM, SSD o GPU antes de iniciar.'
-            self._set_benchmark_progress(0.0, self._benchmark_stage, self._benchmark_detail)
-            try:
-                if self._benchmark_selection_label is not None:
-                    self._benchmark_selection_label.configure(text='Selecciona al menos un componente.', text_color=AMBER)
-            except Exception:
-                pass
-            return
-
-        profile_key = self._benchmark_profile_key
-        profile = benchmark_profile_info(profile_key)
-        component_text = ' · '.join(key.upper() for key in selected)
-        self._benchmark_progress = 0.0
-        self._benchmark_stage = f"Preparando {profile['label'].lower()}"
-        self._benchmark_detail = f"{profile['duration_label']} con {component_text}. La duración baja si ejecutas menos componentes."
-        try:
-            self.btn_bench.configure(text='Ejecutando benchmark…', state='disabled')
-        except Exception:
-            pass
-        self._set_benchmark_progress(0.01, self._benchmark_stage, self._benchmark_detail)
-
-        tele_before = copy.deepcopy(getattr(self.app, 'latest_telemetry', {}) or {})
-        disks_before = copy.deepcopy(getattr(self.app, 'latest_disks', []) or [])
-        before_snapshot = capture_metrics(tele_before, disks_before, None, label='benchmark_before')
-
-        def progress(fraction, stage, detail=''):
-            try:
-                self.app.after(0, lambda f=fraction, s=stage, d=detail: self._set_benchmark_progress(f, s, d))
-            except Exception:
-                pass
-
-        def telemetry_sample():
-            tele = copy.deepcopy(getattr(self.app, 'latest_telemetry', {}) or {})
-            return _benchmark_live_metrics(tele)
-
-        def work():
-            return run_benchmark_suite(
-                profile_key, selected,
-                progress_callback=progress, telemetry_sampler=telemetry_sample
-            )
-
-        def done(r, e):
-            self._bench = r or {'error': e}
-            tele_after = copy.deepcopy(getattr(self.app, 'latest_telemetry', {}) or {})
-            disks_after = copy.deepcopy(getattr(self.app, 'latest_disks', []) or [])
-            self._bench_compare = compare(before_snapshot, capture_metrics(tele_after, disks_after, None, label='benchmark_after'))
-            store = getattr(self.app, 'health_history_store', None)
-            if store and isinstance(r, dict):
-                for key in ('cpu', 'ram', 'ssd', 'gpu'):
-                    try:
-                        result = r.get(key) or {}
-                        if str(result.get('status') or '').upper() != 'SKIPPED':
-                            store.record_benchmark(result)
-                    except Exception:
-                        pass
-            self._benchmark_progress = 1.0
-            self._benchmark_stage = 'Benchmark completado' if not e else 'Benchmark finalizado con aviso'
-            self._benchmark_detail = f"{profile['label']} · {component_text} · resultados listos para revisar."
-            self._refresh_benchmark_action_state()
-
-        self._async('benchmark', work, done)
-
     def _capture_slot(self,slot):
         tele=copy.deepcopy(getattr(self.app,'latest_telemetry',{}) or {}); disks=copy.deepcopy(getattr(self.app,'latest_disks',[]) or [])
         batt=self._battery or collect_battery_health(tele)
@@ -4113,7 +3942,7 @@ class HealthCenterPanel:
             self._alive = False
             return
         manager = getattr(self.app, 'performance_manager', None)
-        dynamic_blockers = {'profile_change', 'benchmark', 'game_scan'}
+        dynamic_blockers = {'profile_change', 'visual_benchmark', 'game_scan'}
         if manager is not None and self._tab == 'performance' and not (dynamic_blockers & self._jobs):
             try:
                 generation = manager.status().get('generation')
@@ -4131,7 +3960,7 @@ class HealthCenterPanel:
             try: self.app.after_cancel(self._performance_after_id)
             except Exception: pass
             self._performance_after_id = None
-        elif self._visible and self._performance_only and self._performance_after_id is None and self._alive:
+        elif self._visible and self._performance_only and not self._benchmark_only and self._performance_after_id is None and self._alive:
             self._schedule_performance_status_tick()
 
     def refresh(self):

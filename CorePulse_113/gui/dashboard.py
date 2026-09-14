@@ -55,6 +55,7 @@ SIDEBAR_INACTIVE_TEXT = theme_color('#c2ccda')
 
 SIDEBAR_ICON_FILES = {
     '_btn_summary': 'summary.png',
+    'btn_benchmark': 'overlay.png',
     'btn_diagnostic': 'diagnostic.png',
     'btn_health_center': 'health.png',
     'btn_cleanup': 'cleanup.png',
@@ -66,6 +67,7 @@ SIDEBAR_ICON_FILES = {
 }
 SIDEBAR_LABELS = {
     '_btn_summary': 'Resumen',
+    'btn_benchmark': 'Benchmark',
     'btn_diagnostic': 'Iniciar diagnóstico',
     'btn_health_center': 'Centro de salud',
     'btn_cleanup': 'Limpieza de sistema',
@@ -715,6 +717,11 @@ def _rebuild_sidebar(app):
     app._btn_summary = ctk.CTkButton(app.sidebar, text='Resumen', command=lambda: None)
     _apply_sidebar_icon(app, '_btn_summary', active=True)
     app._btn_summary.pack(fill='x', padx=11, pady=1)
+
+    # V113: Benchmark es una función principal independiente. No pertenece a
+    # Diagnóstico ni a Gaming; su botón abre únicamente el benchmark visual.
+    _apply_sidebar_icon(app, 'btn_benchmark')
+    app.btn_benchmark.pack(fill='x', padx=11, pady=(1, 4))
 
     # V0.10.2.89w: Gaming se consolida dentro de Centro de salud > Rendimiento.
     # btn_overlay se conserva en main.py sólo como referencia interna de compatibilidad,

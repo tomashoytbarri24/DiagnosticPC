@@ -12,9 +12,10 @@ ACTIVE_BORDER = theme_color('#17658f')
 ACTIVE_TEXT = '#08aef0'
 INACTIVE_TEXT = theme_color('#c2ccda')
 HOVER = theme_color('#0e1d2f')
-ACTIONS = ('btn_diagnostic', 'btn_health_center', 'btn_cleanup', 'btn_tweaks', 'btn_network', 'btn_smart_alerts', 'btn_session_trends', 'btn_alert_history', '_theme_toggle_button')
+ACTIONS = ('btn_benchmark', 'btn_diagnostic', 'btn_health_center', 'btn_cleanup', 'btn_tweaks', 'btn_network', 'btn_smart_alerts', 'btn_session_trends', 'btn_alert_history', '_theme_toggle_button')
 CONTEXT_BUTTON = {
     'dashboard': '_btn_summary',
+    'benchmark': 'btn_benchmark',
     'gaming': 'btn_health_center',
     'overlay': 'btn_health_center',
     'diagnostic': 'btn_diagnostic',
@@ -87,6 +88,7 @@ def _install_debounced_commands(app):
 
     routes = {
         '_btn_summary': ('dashboard', lambda: show_dashboard(app)),
+        'btn_benchmark': ('benchmark', lambda: app.open_benchmark()),
         'btn_diagnostic': ('diagnostic', lambda: app.start_diagnostic_session()),
         'btn_health_center': ('health_center', lambda: app.open_health_center()),
         'btn_cleanup': ('cleanup', lambda: app.run_cleanup()),

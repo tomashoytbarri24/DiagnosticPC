@@ -1,9 +1,13 @@
-# V113 — Benchmark preconfigurable
+# V113 — Benchmark GPU principal por áreas
 
-- Flujo de benchmark reorganizado para configurar siempre antes de ejecutar.
-- Se elimina el inicio directo desde la vista de Estabilidad; ahora abre la pantalla de configuración.
-- Selector de perfil y componentes preceden al botón de ejecución.
-- El botón queda deshabilitado cuando no hay componentes seleccionados y los controles se bloquean mientras la prueba está en curso.
+- Benchmark pasa a ser una página principal independiente de CorePulse, fuera de Gaming y Diagnóstico.
+- La prueba visual OpenGL es ahora el benchmark principal visible.
+- Ejecución dividida en cuatro cargas reales: Geometría, Fill / fragmentos, Texturas / VRAM y Carga combinada.
+- Cada fase conserva sus propios FPS, 1% Low, frametime P95/P99 y resumen de telemetría real.
+- La fase Texturas / VRAM crea recursos OpenGL reales y registra la memoria solicitada por la prueba sin presentarla como capacidad total de VRAM.
+- El resultado principal corresponde a Carga combinada; no se fabrican rankings ni puntuaciones calibradas.
+- Shaders programables, Compute y Ray Tracing no se etiquetan como medidos hasta existir una carga real específica para ellos.
+- Se preservan warm-up, VSync auditado, resolución de cliente fija, protección térmica y REAL_FPS_OR_NA_ONLY.
 
 # V112 — Estabilidad de Windows más clara + artwork universal de NVIDIA App
 

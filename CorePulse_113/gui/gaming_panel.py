@@ -245,14 +245,13 @@ class GamingPanel:
     def _apply_view_style(self):
         """Refleja una navegación única y evita acciones duplicadas en cabecera."""
         section = 'overlay' if self._tab == 'overlay' else self._current_performance_section()
-        # Benchmark pertenece a Estabilidad y Game Boost pertenece a Inicio.
-        # Así la navegación superior conserva una jerarquía estable aunque se
-        # abra una subvista de configuración.
-        nav_section = 'stability' if section == 'benchmark' else 'home' if section == 'boost' else section
+        # Game Boost pertenece a Inicio. Benchmark vive ahora como módulo
+        # principal independiente y ya no forma parte de Gaming.
+        nav_section = 'home' if section == 'boost' else section
         subtitles = {
             'home': 'Juego actual, perfil y estado del equipo en una sola vista',
             'library': 'Tus juegos detectados y manuales, sin ruido técnico innecesario',
-            'stability': 'Sesión, temperaturas, throttling y benchmark con evidencia real',
+            'stability': 'Sesión, temperaturas y throttling con evidencia real',
             'overlay': 'Overlay In-Game · métricas reales y configuración sólo cuando la necesites',
         }
         try:
