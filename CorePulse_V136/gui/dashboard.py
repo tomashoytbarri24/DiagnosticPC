@@ -5,7 +5,7 @@ no calcula salud y no reemplaza ninguna autoridad de diagnóstico. Los widgets
 siguen consumiendo exactamente los mismos datos reales del runtime.
 """
 from __future__ import annotations
-from core.theme_manager import color as theme_color, brand_symbol_path, sidebar_assets_path, theme_action_label, role_color, get_theme_profile
+from core.theme_manager import color as theme_color, brand_symbol_path, sidebar_assets_path, theme_action_label, role_color
 
 import time
 import math
@@ -756,55 +756,81 @@ def _rebuild_sidebar(app):
     _apply_sidebar_icon(app, 'btn_alert_history')
     app.btn_alert_history.pack(fill='x', padx=11, pady=1)
 
-    app._update_button = ctk.CTkButton(
+    # V132 — Fix de arranque CTkButton: Personalización conserva el diseño de V131,
+    # sin kwargs padx/pady no soportados por CustomTkinter.
+    # V131 — Personalización vuelve a comportarse como navegación contextual:
+    # transparente mientras está inactiva y resaltada sólo al abrir su módulo.
+    # Temas y Actualizaciones comparten un único bloque visual para evitar que
+    # queden dispersos por el sidebar al cambiar el alto de la ventana.
+    personalization_block = ctk.CTkFrame(
         app.sidebar,
-        text='Actualizaciones',
-        height=31,
+        fg_color=COLORS['surface'],
+        border_width=1,
+        border_color=COLORS['border'],
+        corner_radius=12,
+    )
+    app._personalization_block = personalization_block
+
+    personalization = _section_label(personalization_block, 'PERSONALIZACIÓN')
+    app._personalization_label = personalization
+    personalization.pack(fill='x', padx=12, pady=(9, 1))
+    app._personalization_hint = ctk.CTkLabel(
+        personalization_block,
+        text='Apariencia y versión',
+        height=14,
+        font=(FONT, 7),
+        text_color=COLORS['muted'],
+        anchor='w',
+    )
+    app._personalization_hint.pack(fill='x', padx=12, pady=(0, 6))
+
+    app._theme_toggle_button = ctk.CTkButton(
+        personalization_block,
+        text='◉  Temas',
+        height=34,
         corner_radius=9,
         fg_color='transparent',
-        hover_color=COLORS['surface_hover'],
-        border_width=1,
+        hover_color=COLORS['surface_2'],
+        border_width=0,
         border_color=COLORS['border'],
         text_color=COLORS['text_2'],
         font=(FONT, 9, 'bold'),
-        command=getattr(app, 'open_update_center', None),
-    )
-    app._update_button.pack(side='bottom', fill='x', padx=12, pady=(2, 4))
-
-    # V126: Temas queda tratado como una acción principal de personalización.
-    # Accent, hover y texto usan roles EXACTOS de la paleta activa.
-    personalization = _section_label(app.sidebar, 'PERSONALIZACIÓN')
-    app._personalization_label = personalization
-    personalization.pack(fill='x', padx=17, pady=(10, 3))
-    theme_profile = get_theme_profile()
-    theme_accent = role_color('accent')
-    theme_accent_2 = role_color('accent_2')
-    theme_text = role_color('text') if theme_profile.get('appearance') == 'dark' else role_color('surface')
-    app._theme_toggle_button = ctk.CTkButton(
-        app.sidebar,
-        text='◉  TEMAS',
-        height=42,
-        corner_radius=11,
-        fg_color=theme_accent,
-        hover_color=theme_accent_2,
-        border_width=2,
-        border_color=theme_accent_2,
-        text_color=theme_text,
-        font=(FONT, 10, 'bold'),
+        anchor='w',
         command=getattr(app, 'open_themes', None),
     )
-    app._theme_toggle_button.pack(side='top', fill='x', padx=11, pady=(1, 6))
+    app._theme_toggle_button.pack(fill='x', padx=7, pady=(0, 2))
+
+    app._update_button = ctk.CTkButton(
+        personalization_block,
+        text='↻  Actualizaciones',
+        height=34,
+        corner_radius=9,
+        fg_color='transparent',
+        hover_color=COLORS['surface_2'],
+        border_width=0,
+        border_color=COLORS['border'],
+        text_color=COLORS['text_2'],
+        font=(FONT, 9, 'bold'),
+        anchor='w',
+        command=getattr(app, 'open_update_center', None),
+    )
+    app._update_button.pack(fill='x', padx=7, pady=(2, 4))
+
+    divider = ctk.CTkFrame(personalization_block, fg_color=COLORS['border'], height=1, corner_radius=0)
+    divider.pack(fill='x', padx=10, pady=(2, 5))
+    app._personalization_divider = divider
 
     app._sidebar_version = ctk.CTkLabel(
-        app.sidebar,
+        personalization_block,
         text=f'{VERSION_LABEL} · Cereon Technologies',
         justify='left',
         font=(FONT, 7),
         text_color=COLORS['muted'],
         anchor='w',
     )
-    # V113: la versión vuelve a la esquina inferior izquierda del sidebar.
-    app._sidebar_version.pack(side='bottom', fill='x', padx=14, pady=(3, 10))
+    app._sidebar_version.pack(fill='x', padx=12, pady=(0, 8))
+
+    personalization_block.pack(side='top', fill='x', padx=10, pady=(10, 8))
 
 
 def _style_existing_cards(app):

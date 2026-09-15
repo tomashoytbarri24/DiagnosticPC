@@ -1,3 +1,62 @@
+# CorePulse V136
+
+- Publicación: selección de repositorio más robusta; acepta cualquier subcarpeta de un checkout Git.
+- Si se selecciona una copia ZIP sin `.git`, CorePulse busca clones Git cercanos no recursivamente y adopta automáticamente un candidato inequívoco.
+- `Revisar` ahora muestra hora de la comprobación, raíz Git, rama, remoto, FASE 1/2/3 y el motivo exacto del bloqueo.
+- Mensaje específico para distinguir una carpeta extraída desde ZIP de un clon creado con `git clone`.
+- Mantiene bloqueo de `main/master/trunk` y staging exclusivo de carpetas CorePulse versionadas.
+
+# V134 — Autodiagnóstico de capacidades de CorePulse
+
+- Centro de Salud incorpora una tarjeta `CorePulse` con acceso a un autodiagnóstico interno.
+- El diagnóstico separa dependencias obligatorias, herramientas opcionales y sensores realmente expuestos por el equipo actual.
+- Estados descriptivos: Disponible, Parcial, N/A, Info o Error; una capacidad opcional N/A nunca se convierte en fallo ni reduce una salud sintética.
+- Reutiliza el último snapshot certificado para CPU/RAM/GPU/almacenamiento/batería y ejecuta el preflight de runtime en background para no bloquear la interfaz.
+- Detecta de forma explícita PresentMon, RTSS, Ookla, WMI/pywin32/pythonnet, LibreHardwareMonitor, PowerShell, permisos y dependencias del runtime.
+- Guarda un informe técnico local `corepulse_capabilities.json` en la carpeta de diagnósticos.
+- Runtime universal y SMART/NVMe permanecen sin cambios.
+
+# V133 — Balance vertical de Personalización en modo ventana
+
+- Ajusta únicamente el bloque lateral de Personalización cuando el alto útil es limitado.
+- `Temas` y `Actualizaciones` mantienen tamaño legible y el mismo comportamiento contextual.
+- Se eliminan primero metadatos secundarios (`Apariencia y versión`, divisor y versión) para que `Actualizaciones` no quede forzado contra el borde inferior.
+- No cambia el layout principal, telemetría, runtime canónico ni SMART/NVMe.
+
+# V132 — Hotfix de arranque CustomTkinter
+
+- Eliminados `padx` no soportados de los constructores `CTkButton` de Personalización.
+- Conservado el padding externo y el comportamiento visual de V131.
+- Añadida prueba preventiva para kwargs no soportados en `CTkButton`.
+
+# V131 — Personalización refinada + layout responsive estable
+
+- `Temas` vuelve a ser transparente cuando no está seleccionado y usa el color activo sólo mientras su módulo está abierto.
+- `Temas` y `Actualizaciones` comparten una tarjeta de Personalización más limpia, con subtítulo y versión integrados.
+- Sidebar compacto conserva ancho/altura/font mínimos legibles en vez de reducir demasiado sus elementos.
+- `Centro de actualizaciones` cambia a un grid vertical estable: el panel de estado absorbe el espacio variable y las acciones inferiores ya no quedan cortadas al restaurar la ventana.
+- El módulo reacciona al viewport sin destruir/recrear widgets.
+- Runtime canónico y SMART/NVMe sin cambios.
+
+# V130 — Actualizaciones integradas + Temas estable desde el arranque
+
+- `Temas` conserva siempre su fondo accent exacto desde el primer frame; el reflow responsivo ya no puede volverlo transparente.
+- `Actualizaciones` deja de abrir un `CTkToplevel`: ahora es una página interna cacheable dentro de la misma ventana principal.
+- Búsqueda automática al entrar al módulo y al cambiar de canal, manteniendo `Buscar actualizaciones` como refresco manual.
+- Flujo visible `Buscar → verificar SHA-256 → instalar/probar → rollback`, con mensajes claros cuando un canal aún no tiene Releases.
+- Se conserva la protección de checkouts Git: nunca se sobrescribe la rama de desarrollo.
+- Runtime canónico y SMART/NVMe sin cambios.
+
+# V129 — Centro de Actualizaciones Seguro
+
+- Centro rediseñado con canales Desarrollo/Estable, versión actual/nueva, fecha, tamaño y changelog.
+- Descarga sólo el asset de release y exige SHA-256 verificable antes de permitir instalación.
+- Acepta digest publicado por GitHub o checksum sidecar.
+- Copias fuente portables: backup, aplicación diferida, relanzado y rollback.
+- Checkouts Git: no sobrescribe la rama; mantiene preparación aislada para pruebas.
+- UI alineada con roles exactos del tema activo.
+- Runtime canónico y SMART/NVMe sin cambios.
+
 # V126 — Windows Health Summary Cards + Theme CTA
 
 ## Centro de salud · Windows
@@ -424,3 +483,10 @@
 - `Wear=0` de StorageReliabilityCounter queda cualitativo salvo corroboración/direct SMART; no genera 100% ni un crítico falso.
 - Temperatura 0 °C y `TemperatureMax=0` pasan a N/A.
 - Centro de Salud ya no convierte un dato SMART no soportado en `Requiere atención inmediata`.
+
+## V135
+- Publicación segura desde Centro de Actualizaciones hacia una rama Git de desarrollo.
+- Mensaje de commit editable desde CorePulse.
+- Protección explícita de `FASE 1`, `FASE 2` y `FASE 3`.
+- Bloqueo de publicación directa sobre `main/master/trunk`.
+- Generación automática de ZIP + SHA-256 para GitHub Releases después del push.

@@ -1,4 +1,7 @@
-# Versión actual: V126
+## V136
+Detección robusta del clon Git y feedback explícito al revisar publicación.
+
+# Versión actual: V133
 
 V126 continúa V125 sin reemplazos brutos: refuerza el acceso a Temas y convierte la portada de Análisis de Windows en tarjetas grandes con resumen real y acceso diferido al detalle. Próxima versión: V127.
 
@@ -25,9 +28,48 @@ CorePulse usa numeración simple y creciente.
 
 - V100 < V101 < ... < V121 < V122 < V123 ...
 - El número mayor es siempre la versión más reciente.
-- Versión actual: **V125**.
+- Versión actual: **V133**.
 
 El sistema de runtime canónico NO depende del número de versión y se conserva desde la base universal corregida.
+
+
+
+
+## V133 — Balance vertical de Personalización
+- En ventanas restauradas con poco alto, Personalización adopta un modo vertical ajustado aunque el ancho siga clasificando la interfaz como estándar.
+- `Temas` y `Actualizaciones` conservan botones completos; se ocultan antes el subtítulo y la versión para evitar que Actualizaciones quede pegado al borde inferior.
+- El bloque reduce sólo márgenes verticales secundarios, sin miniaturizar la navegación ni cambiar el comportamiento contextual de Temas.
+- Runtime universal y SMART/NVMe permanecen sin cambios.
+
+## V132 — Corrección de arranque CustomTkinter
+- Corrige el crash de V131 al crear los botones Temas y Actualizaciones: `CTkButton` no acepta `padx`/`pady` en su constructor.
+- El espaciado interno visual se conserva mediante el texto/alineación y el padding externo permanece en `.pack()`.
+- Se añade una validación AST para impedir que vuelva a introducirse `padx` o `pady` como keyword de `CTkButton`.
+- No cambia el diseño responsive ni el comportamiento contextual de Temas introducido en V131.
+- Runtime universal y SMART/NVMe permanecen sin cambios.
+
+
+## V131 — Personalización compacta + responsive estable
+- Temas vuelve al comportamiento contextual: fondo transparente mientras está inactivo y `accent_2` únicamente al abrir su módulo.
+- Temas y Actualizaciones se agrupan en una tarjeta única de Personalización con jerarquía visual, versión y marca integradas.
+- El sidebar mantiene una anchura y alturas mínimas legibles en ventanas compactas; deja de reducir agresivamente navegación y CTA.
+- Centro de Actualizaciones usa grid con un único tramo elástico: el changelog se adapta y el pie de acciones siempre permanece visible al maximizar/restaurar.
+- Runtime universal y SMART/NVMe permanecen sin cambios.
+
+## V130 — Actualizaciones embebidas + CTA Temas estable
+- Temas mantiene siempre `accent`/`accent_2` exactos, incluso durante reflows responsivos y antes del primer clic.
+- Actualizaciones forma parte del sistema de navegación interna de CorePulse y ya no crea una segunda ventana.
+- La página comprueba automáticamente el canal seleccionado y explica cuando no existe una Release publicada.
+- SHA-256, backup, rollback y protección de checkouts Git de V129 se conservan.
+- Runtime universal y SMART/NVMe permanecen sin cambios.
+
+## V129 — Centro de Actualizaciones Seguro
+- Canales Desarrollo y Estable sobre GitHub Releases.
+- Descarga sólo el paquete publicado, sin clonar el repositorio.
+- SHA-256 obligatorio mediante digest de GitHub o sidecar de checksums.
+- Backup previo, helper de aplicación y rollback para copias fuente portables.
+- Checkouts Git nunca se sobrescriben automáticamente.
+- Runtime universal y SMART/NVMe permanecen sin cambios.
 
 ## V123 — Transporte SMART NVMe y fallback seguro
 - La consulta `IOCTL_STORAGE_QUERY_PROPERTY` usa el buffer completo para entrada y salida, tal como recomienda Microsoft para datos NVMe protocol-specific.
@@ -73,3 +115,19 @@ El sistema de runtime canónico NO depende del número de versión y se conserva
 - En modo PyInstaller/instalado prioriza el instalador de la release y lo abre sólo después de verificarlo.
 - Los scripts de build leen `core/version.py` para evitar nombres de instalador anclados a versiones antiguas.
 - No hay actualización automática al inicio.
+
+
+## V134 — Autodiagnóstico de capacidades de CorePulse
+- Estado de CorePulse accesible desde Centro de Salud.
+- Preflight real + matriz de sensores del snapshot actual; sin consultas sintéticas ni rankings.
+- N/A representa capacidad opcional no instalada/presente/expuesta y no se interpreta como avería.
+- Informe JSON técnico persistente para soporte y trazabilidad.
+- Runtime universal y SMART/NVMe permanecen sin cambios.
+
+
+## V135 — Publicación Git segura desde CorePulse
+- Publicación a una rama de desarrollo desde el Centro de Actualizaciones.
+- Mensaje de commit editable y push usando la autenticación Git existente.
+- `FASE 1`, `FASE 2` y `FASE 3` quedan explícitamente fuera del staging y se validan antes/después.
+- `main/master/trunk` y detached HEAD quedan bloqueados.
+- Tras publicar se genera ZIP + SHA-256 preparado para GitHub Releases.

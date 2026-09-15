@@ -33,7 +33,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 import zipfile
 
-from core.runtime_paths import config_path, data_path, is_frozen
+from core.runtime_paths import config_path, data_path, executable_root, is_frozen, source_root
 from core.version import VERSION, VERSION_LABEL
 
 DEFAULT_OWNER = "tomashoytbarri24"
@@ -42,6 +42,7 @@ API_VERSION = "2026-03-10"
 USER_AGENT = f"CorePulse/{VERSION} updater"
 PREFERENCES_FILE = "update_preferences.json"
 CHANNEL_INTERNAL = "internal"
+CHANNEL_DEVELOPMENT = CHANNEL_INTERNAL
 CHANNEL_STABLE = "stable"
 VALID_CHANNELS = {CHANNEL_INTERNAL, CHANNEL_STABLE}
 
@@ -451,3 +452,411 @@ __all__ = [
     "open_updates_folder", "parse_version_key", "releases_web_url",
     "save_preferences", "sha256_file", "stage_source_release", "updates_dir",
 ]
+
+# ---------------------------------------------------------------------------
+# V129 · Centro de actualizaciones seguro
+# ---------------------------------------------------------------------------
+BACKUP_KEEP = 3
+_MANAGED_DIRS = {
+    "assets", "build", "core", "database", "gui", "installer", "performance",
+    "tests", "tools",
+}
+_PRESERVED_NAMES = {".git", ".venv", "data", "logs", "__pycache__"}
+
+
+def installation_mode() -> str:
+    """Devuelve installed/source-git/source-portable sin adivinar capacidades."""
+    if is_frozen():
+        return "installed"
+    root = source_root().resolve()
+    cursor = root
+    for _ in range(5):
+        if (cursor / ".git").exists():
+            return "source-git"
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+    return "source-portable"
+
+
+def source_update_supported() -> bool:
+    """Nunca pisa un checkout Git: en desarrollo sólo prepara una copia aislada."""
+    return installation_mode() == "source-portable"
+
+
+def _sidecar_candidates(release: ReleaseInfo, asset: ReleaseAsset) -> list[ReleaseAsset]:
+    target = asset.name.casefold()
+    exact_names = {
+        f"{target}.sha256", f"{target}.sha256.txt", f"{target}.sha256sum",
+        "sha256sums", "sha256sums.txt", "checksums.txt", "checksums.sha256",
+    }
+    out = []
+    for candidate in release.assets:
+        name = candidate.name.casefold()
+        if name in exact_names or ("sha256" in name and name != target):
+            out.append(candidate)
+    return out
+
+
+def _parse_checksum_text(text: str, asset_name: str) -> str | None:
+    wanted = Path(asset_name).name.casefold()
+    hashes: list[str] = []
+    for raw_line in str(text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        match = re.search(r"(?i)\b([0-9a-f]{64})\b", line)
+        if not match:
+            continue
+        value = match.group(1).lower()
+        hashes.append(value)
+        if wanted in line.casefold():
+            return value
+    return hashes[0] if len(hashes) == 1 else None
+
+
+def resolve_release_sha256(
+    release: ReleaseInfo,
+    asset: ReleaseAsset,
+    *,
+    timeout: float = 12.0,
+    opener=urlopen,
+) -> tuple[str | None, str]:
+    """Obtiene SHA-256 desde digest de GitHub o asset sidecar publicado."""
+    if asset.sha256:
+        return asset.sha256, "github-digest"
+    for sidecar in _sidecar_candidates(release, asset):
+        try:
+            request = _request(
+                _download_url(sidecar),
+                accept="application/octet-stream" if sidecar.api_url and _download_url(sidecar) == sidecar.api_url else "*/*",
+            )
+            with opener(request, timeout=timeout) as response:
+                raw = response.read(256 * 1024)
+            expected = _parse_checksum_text(raw.decode("utf-8", errors="replace"), asset.name)
+            if expected:
+                return expected, f"sidecar:{sidecar.name}"
+        except Exception:
+            continue
+    return None, "missing"
+
+
+def download_asset_verified(
+    asset: ReleaseAsset,
+    release: ReleaseInfo,
+    *,
+    progress: Callable[[int, int], None] | None = None,
+    timeout: float = 30.0,
+    opener=urlopen,
+) -> dict:
+    """V129: descarga sólo el asset elegido y exige SHA-256 verificable."""
+    expected, source = resolve_release_sha256(release, asset, timeout=min(timeout, 12.0), opener=opener)
+    if not expected:
+        raise UpdateError(
+            "La release no publica un SHA-256 verificable para el paquete seleccionado. "
+            "CorePulse no instalará una actualización sin integridad comprobada."
+        )
+    target_dir = updates_dir() / (release.tag or release.name or "release")
+    target_dir.mkdir(parents=True, exist_ok=True)
+    target = target_dir / Path(asset.name).name
+    part = target.with_suffix(target.suffix + ".part")
+    part.unlink(missing_ok=True)
+    try:
+        request = _request(
+            _download_url(asset),
+            accept="application/octet-stream" if asset.api_url and _download_url(asset) == asset.api_url else "*/*",
+        )
+        with opener(request, timeout=timeout) as response, part.open("wb") as handle:
+            total = int(response.headers.get("Content-Length") or asset.size or 0)
+            downloaded = 0
+            while True:
+                chunk = response.read(256 * 1024)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                downloaded += len(chunk)
+                if progress:
+                    progress(downloaded, total)
+        os.replace(part, target)
+    except Exception as exc:
+        part.unlink(missing_ok=True)
+        raise _friendly_network_error(exc) from exc
+    actual = sha256_file(target)
+    if actual.casefold() != expected.casefold():
+        target.unlink(missing_ok=True)
+        raise UpdateError("La descarga no superó la verificación SHA-256 y fue eliminada.")
+    metadata = {
+        "version": release.tag,
+        "release_name": release.name,
+        "asset": asset.name,
+        "path": str(target),
+        "sha256": actual,
+        "expected_sha256": expected,
+        "checksum_source": source,
+        "verified": True,
+        "downloaded_at": time.time(),
+        "source": release.html_url,
+    }
+    try:
+        (target_dir / "download.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+    return metadata
+
+
+def _package_root_from_extract(destination: Path) -> Path:
+    if (destination / "main.py").is_file():
+        return destination
+    candidates = [child for child in destination.iterdir() if child.is_dir() and (child / "main.py").is_file()]
+    if len(candidates) == 1:
+        return candidates[0]
+    for child in candidates:
+        if (child / "core" / "version.py").is_file():
+            return child
+    raise UpdateError("El ZIP verificado no contiene una raíz reconocible de CorePulse.")
+
+
+def backup_dir() -> Path:
+    path = updates_dir() / "backups"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _backup_filter(path: Path) -> bool:
+    return not any(part in _PRESERVED_NAMES for part in path.parts)
+
+
+def create_source_backup(*, label: str | None = None) -> dict:
+    """Crea un ZIP de rollback del código actual, sin .git/.venv ni estado mutable."""
+    root = source_root().resolve()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    safe_label = re.sub(r"[^A-Za-z0-9._-]+", "_", str(label or VERSION_LABEL))
+    target = backup_dir() / f"CorePulse_{safe_label}_{stamp}.zip"
+    tmp = target.with_suffix(".zip.part")
+    tmp.unlink(missing_ok=True)
+    with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+        for path in root.rglob("*"):
+            rel = path.relative_to(root)
+            if any(part in _PRESERVED_NAMES for part in rel.parts):
+                continue
+            if path.is_file():
+                archive.write(path, rel.as_posix())
+    os.replace(tmp, target)
+    digest = sha256_file(target)
+    _prune_backups()
+    return {"path": str(target), "sha256": digest, "created_at": time.time(), "version": VERSION_LABEL}
+
+
+def _prune_backups(keep: int = BACKUP_KEEP) -> None:
+    files = sorted(backup_dir().glob("CorePulse_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in files[max(1, int(keep)):]:
+        try:
+            old.unlink()
+        except Exception:
+            pass
+
+
+def list_source_backups() -> list[dict]:
+    out = []
+    for path in sorted(backup_dir().glob("CorePulse_*.zip"), key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            out.append({
+                "path": str(path), "name": path.name, "size": path.stat().st_size,
+                "mtime": path.stat().st_mtime, "sha256": sha256_file(path),
+            })
+        except Exception:
+            continue
+    return out
+
+
+def prepare_source_update(download: dict) -> dict:
+    """Prepara actualización in-place sólo para copias fuente no gestionadas por Git."""
+    if not source_update_supported():
+        raise UpdateError(
+            "CorePulse detectó un checkout Git. Por seguridad no sobrescribe código versionado; "
+            "usa 'Preparar copia de prueba' o actualiza la rama con Git."
+        )
+    if not download.get("verified"):
+        raise UpdateError("La actualización sólo puede prepararse después de verificar SHA-256.")
+    package = Path(str(download.get("path") or ""))
+    if package.suffix.casefold() != ".zip" or not package.is_file():
+        raise UpdateError("La actualización portable/fuente necesita un paquete ZIP.")
+    version = re.sub(r"[^A-Za-z0-9._-]+", "_", str(download.get("version") or "release"))
+    stage = updates_dir() / "apply" / version
+    if stage.exists():
+        shutil.rmtree(stage, ignore_errors=True)
+    _safe_extract_zip(package, stage)
+    incoming = _package_root_from_extract(stage)
+    backup = create_source_backup(label=VERSION_LABEL)
+    plan = {
+        "mode": "update",
+        "pid": os.getpid(),
+        "current_root": str(source_root().resolve()),
+        "incoming_root": str(incoming.resolve()),
+        "backup_zip": backup["path"],
+        "python": sys.executable,
+        "relaunch": "main.py",
+        "status": str((updates_dir() / "last_update_status.json").resolve()),
+        "target_version": str(download.get("version") or ""),
+    }
+    return _write_update_plan(plan)
+
+
+def prepare_source_rollback(backup_path: str | os.PathLike | None = None) -> dict:
+    if not source_update_supported():
+        raise UpdateError("Rollback automático no se aplica dentro de un checkout Git.")
+    backups = list_source_backups()
+    selected = Path(backup_path).resolve() if backup_path else (Path(backups[0]["path"]).resolve() if backups else None)
+    if selected is None or not selected.is_file():
+        raise UpdateError("No hay una copia de seguridad disponible para restaurar.")
+    plan = {
+        "mode": "rollback",
+        "pid": os.getpid(),
+        "current_root": str(source_root().resolve()),
+        "backup_zip": str(selected),
+        "python": sys.executable,
+        "relaunch": "main.py",
+        "status": str((updates_dir() / "last_update_status.json").resolve()),
+        "target_version": "rollback",
+    }
+    return _write_update_plan(plan)
+
+
+def _write_update_plan(plan: dict) -> dict:
+    root = updates_dir() / "helper"
+    root.mkdir(parents=True, exist_ok=True)
+    plan_path = root / "update_plan.json"
+    helper_path = root / "apply_update.py"
+    plan_path.write_text(json.dumps(plan, indent=2, ensure_ascii=False), encoding="utf-8")
+    helper_path.write_text(_UPDATE_HELPER_SCRIPT, encoding="utf-8")
+    result = dict(plan)
+    result.update({"plan": str(plan_path), "helper": str(helper_path)})
+    return result
+
+
+def launch_source_update_helper(plan: dict) -> bool:
+    helper = Path(str(plan.get("helper") or ""))
+    plan_path = Path(str(plan.get("plan") or ""))
+    python = Path(str(plan.get("python") or sys.executable))
+    if not helper.is_file() or not plan_path.is_file() or not python.is_file():
+        raise UpdateError("No se pudo preparar el proceso auxiliar de actualización.")
+    kwargs = {"cwd": str(helper.parent), "close_fds": True}
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) | getattr(subprocess, "DETACHED_PROCESS", 0)
+    subprocess.Popen([str(python), str(helper), str(plan_path)], **kwargs)
+    return True
+
+
+def read_last_update_status() -> dict | None:
+    path = updates_dir() / "last_update_status.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+_UPDATE_HELPER_SCRIPT = r'''from __future__ import annotations
+import json, os, shutil, subprocess, sys, time, zipfile
+from pathlib import Path
+
+PRESERVE = {".git", ".venv", "data", "logs", "__pycache__"}
+MANAGED_DIRS = {"assets", "build", "core", "database", "gui", "installer", "performance", "tests", "tools"}
+
+def write_status(path, **payload):
+    try:
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+def wait_pid(pid, timeout=90):
+    if os.name != "nt":
+        time.sleep(1.0); return
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            import ctypes
+            PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+            SYNCHRONIZE = 0x00100000
+            handle = ctypes.windll.kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, int(pid))
+            if not handle:
+                return
+            WAIT_OBJECT_0 = 0
+            result = ctypes.windll.kernel32.WaitForSingleObject(handle, 500)
+            ctypes.windll.kernel32.CloseHandle(handle)
+            if result == WAIT_OBJECT_0:
+                return
+        except Exception:
+            time.sleep(0.5)
+    raise RuntimeError("CorePulse no terminó a tiempo para aplicar la actualización")
+
+def clear_managed(root):
+    for name in MANAGED_DIRS:
+        path = root / name
+        if path.is_dir(): shutil.rmtree(path, ignore_errors=False)
+        elif path.exists(): path.unlink()
+
+def copy_incoming(incoming, root):
+    clear_managed(root)
+    for src in incoming.iterdir():
+        if src.name in PRESERVE: continue
+        dst = root / src.name
+        if src.is_dir():
+            if dst.exists():
+                if dst.is_dir(): shutil.rmtree(dst)
+                else: dst.unlink()
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
+
+def restore_zip(backup, root):
+    clear_managed(root)
+    with zipfile.ZipFile(backup, "r") as zf:
+        zf.extractall(root)
+
+def relaunch(plan, root):
+    py = plan.get("python") or sys.executable
+    entry = root / (plan.get("relaunch") or "main.py")
+    if entry.is_file():
+        subprocess.Popen([py, str(entry)], cwd=str(root), close_fds=True)
+
+def main():
+    plan = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+    root = Path(plan["current_root"]).resolve()
+    status = plan["status"]
+    wait_pid(plan.get("pid", 0))
+    try:
+        if plan.get("mode") == "rollback":
+            restore_zip(Path(plan["backup_zip"]), root)
+            write_status(status, ok=True, action="rollback", finished_at=time.time(), backup=plan["backup_zip"])
+        else:
+            incoming = Path(plan["incoming_root"]).resolve()
+            copy_incoming(incoming, root)
+            write_status(status, ok=True, action="update", target_version=plan.get("target_version"), finished_at=time.time(), backup=plan.get("backup_zip"))
+    except Exception as exc:
+        try:
+            backup = Path(plan.get("backup_zip") or "")
+            if backup.is_file(): restore_zip(backup, root)
+        except Exception:
+            pass
+        write_status(status, ok=False, action=plan.get("mode"), error=f"{type(exc).__name__}: {exc}", finished_at=time.time(), backup=plan.get("backup_zip"))
+    try:
+        relaunch(plan, root)
+    except Exception:
+        pass
+
+if __name__ == "__main__":
+    main()
+'''
+
+# Extiende exportaciones sin romper imports históricos de V118.
+try:
+    __all__.extend([
+        "CHANNEL_DEVELOPMENT", "installation_mode", "source_update_supported",
+        "resolve_release_sha256", "download_asset_verified", "backup_dir",
+        "create_source_backup", "list_source_backups", "prepare_source_update",
+        "prepare_source_rollback", "launch_source_update_helper", "read_last_update_status",
+    ])
+except Exception:
+    pass

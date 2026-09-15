@@ -30,6 +30,7 @@ PAGE_BUTTONS = {
     'trends': 'btn_session_trends',
     'history': 'btn_alert_history',
     'themes': '_theme_toggle_button',
+    'updates': '_update_button',
     'storage_details': None,
     'telemetry_details': None,
     'cpu_details': None,
@@ -50,6 +51,7 @@ PAGE_PANEL_REFS = {
     'trends': 'session_trends_panel',
     'history': 'alert_history_panel',
     'themes': 'theme_panel',
+    'updates': 'update_panel',
     'storage_details': 'storage_detail_panel',
     'telemetry_details': 'telemetry_detail_panel',
     'cpu_details': 'cpu_detail_panel',
@@ -58,7 +60,7 @@ PAGE_PANEL_REFS = {
 }
 
 PANEL_REFS = tuple(PAGE_PANEL_REFS.values())
-CACHEABLE_PAGES = {'benchmark', 'gaming', 'diagnostic', 'health_center', 'cleanup', 'tweaks', 'network', 'alerts', 'trends', 'history', 'themes', 'cpu_details', 'ram_details', 'gpu_details', 'storage_details'}
+CACHEABLE_PAGES = {'benchmark', 'gaming', 'diagnostic', 'health_center', 'cleanup', 'tweaks', 'network', 'alerts', 'trends', 'history', 'themes', 'updates', 'cpu_details', 'ram_details', 'gpu_details', 'storage_details'}
 
 PAGE_LABELS = {
     'benchmark': 'Benchmark',
@@ -72,6 +74,7 @@ PAGE_LABELS = {
     'trends': 'Tendencias',
     'history': 'Historial de alertas',
     'themes': 'Temas',
+    'updates': 'Actualizaciones',
 }
 
 

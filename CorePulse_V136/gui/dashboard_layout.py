@@ -1,6 +1,6 @@
 """Administra la distribución responsiva del dashboard, navegación y tarjeta del agente."""
 from __future__ import annotations
-from core.theme_manager import color as theme_color, theme_action_label, role_color, get_theme_profile
+from core.theme_manager import color as theme_color, theme_action_label, role_color
 # Código refactorizado: nombres estables y documentación en español.
 import threading, types
 import customtkinter as ctk
@@ -33,7 +33,7 @@ SIDEBAR_ACTIVE_BORDER = role_color('accent')
 SIDEBAR_INACTIVE_TEXT = role_color('text_2')
 RESIZE_DEBOUNCE_MS = 85
 FULLSCREEN_SETTLE_MS = 420
-NAV = {'_btn_summary': 'Resumen', 'btn_benchmark': 'Benchmark', 'btn_diagnostic': 'Iniciar diagnóstico', 'btn_health_center': 'Centro de salud', 'btn_cleanup': 'Limpieza de sistema', 'btn_tweaks': 'Tweaks Windows 11', 'btn_network': 'Red avanzada', 'btn_smart_alerts': 'Alertas y diagnóstico', 'btn_session_trends': 'Tendencias', 'btn_alert_history': 'Historial de alertas', '_theme_toggle_button': 'Temas'}
+NAV = {'_btn_summary': 'Resumen', 'btn_benchmark': 'Benchmark', 'btn_diagnostic': 'Iniciar diagnóstico', 'btn_health_center': 'Centro de salud', 'btn_cleanup': 'Limpieza de sistema', 'btn_tweaks': 'Tweaks Windows 11', 'btn_network': 'Red avanzada', 'btn_smart_alerts': 'Alertas y diagnóstico', 'btn_session_trends': 'Tendencias', 'btn_alert_history': 'Historial de alertas'}
 
 def _cfg(w, **kw):
     if w is None:
@@ -108,18 +108,21 @@ def _style_sidebar(app):
             border_color=SIDEBAR_ACTIVE_BORDER,
         )
     _cfg(getattr(app, '_sidebar_version', None), text=f'{VERSION_LABEL} · Cereon Technologies', font=(FONT, 7), text_color=MUTED)
-    # V126 — Temas debe seguir siendo una acción visualmente prioritaria incluso
-    # después de que el layout responsivo reestilice la navegación. Los colores
-    # salen DIRECTAMENTE de la paleta activa; no se oscurecen ni mezclan.
-    theme_profile = get_theme_profile()
-    theme_text = role_color('text') if theme_profile.get('appearance') == 'dark' else role_color('surface')
-    _cfg(
-        getattr(app, '_theme_toggle_button', None),
-        text='◉  TEMAS', height=42, corner_radius=11,
-        fg_color=role_color('accent'), hover_color=role_color('accent_2'),
-        border_width=2, border_color=role_color('accent_2'),
-        text_color=theme_text, font=(FONT, 10, 'bold'), anchor='center', padx=10,
-    )
+    # V131 — Personalización usa el mismo lenguaje contextual del resto del
+    # sidebar: sin relleno hasta seleccionar Temas o Actualizaciones.
+    _cfg(getattr(app, '_personalization_block', None), fg_color=SURFACE, border_color=BORDER, border_width=1, corner_radius=12)
+    _cfg(getattr(app, '_personalization_label', None), text_color=MUTED)
+    _cfg(getattr(app, '_personalization_hint', None), text_color=MUTED)
+    _cfg(getattr(app, '_personalization_divider', None), fg_color=BORDER)
+    for attr, label in (('_theme_toggle_button', '◉  Temas'), ('_update_button', '↻  Actualizaciones')):
+        button = getattr(app, attr, None)
+        _cfg(
+            button, text=label, height=34, corner_radius=9,
+            fg_color='transparent', hover_color=SURFACE_2,
+            border_width=0, border_color=SIDEBAR_ACTIVE_BORDER,
+            text_color=SIDEBAR_INACTIVE_TEXT, font=(FONT, 9, 'bold'),
+            anchor='w', padx=11,
+        )
 
 
 def _is_agent_container(w):
@@ -214,50 +217,27 @@ def _build_agent_card(app):
 
     ver = getattr(app, '_sidebar_version', None)
     try:
-        if ver is not None:
-            ver.pack_forget()
+        # La versión vive dentro del bloque de Personalización desde V131; no se
+        # desmonta al reconstruir la tarjeta del agente.
         card.pack_forget()
     except Exception:
         pass
 
-    theme_button = getattr(app, '_theme_toggle_button', None)
-    personalization_label = getattr(app, '_personalization_label', None)
+    personalization_block = getattr(app, '_personalization_block', None)
     try:
-        if theme_button is not None:
-            theme_button.pack_forget()
-        if personalization_label is not None:
-            personalization_label.pack_forget()
+        if personalization_block is not None:
+            personalization_block.pack_forget()
     except Exception:
         pass
     try:
-        # El agente baja un poco para respirar respecto a la navegación.
-        card.pack(side='top', fill='x', padx=11, pady=(20, 8))
+        # El agente conserva separación sin empujar Personalización fuera del
+        # viewport en ventanas restauradas.
+        card.pack(side='top', fill='x', padx=11, pady=(16, 7))
     except Exception:
         pass
-    if personalization_label is not None:
+    if personalization_block is not None:
         try:
-            personalization_label.pack(side='top', fill='x', padx=17, pady=(3, 3))
-        except Exception:
-            pass
-    if theme_button is not None:
-        try:
-            # V126 — el bloque del agente no puede devolver Temas a un estilo
-            # discreto. Se reafirma aquí el mismo accent EXACTO de la paleta.
-            theme_profile = get_theme_profile()
-            theme_text = role_color('text') if theme_profile.get('appearance') == 'dark' else role_color('surface')
-            _cfg(
-                theme_button, text='◉  TEMAS', height=42, corner_radius=11,
-                fg_color=role_color('accent'), hover_color=role_color('accent_2'),
-                border_width=2, border_color=role_color('accent_2'),
-                text_color=theme_text, font=(FONT, 10, 'bold'), anchor='center', padx=10,
-            )
-            theme_button.pack(side='top', fill='x', padx=12, pady=(1, 5))
-        except Exception:
-            pass
-    if ver is not None:
-        try:
-            # La versión queda en la esquina inferior del sidebar.
-            ver.pack(side='bottom', fill='x', padx=14, pady=(3, 10))
+            personalization_block.pack(side='top', fill='x', padx=10, pady=(5, 7))
         except Exception:
             pass
 
@@ -471,7 +451,16 @@ def _sidebar_section_labels(app):
 def _style_sidebar_mode(app, mode):
     compact = mode == 'compact'
     standard = mode == 'standard'
-    width = 210 if compact else 224 if standard else 236
+    try:
+        viewport_h = int(app.winfo_height())
+    except Exception:
+        viewport_h = 900
+    # V133: una ventana puede seguir siendo 'standard' por ancho aunque tenga
+    # poco alto útil. Personalización usa entonces una variante verticalmente
+    # ajustada sin miniaturizar los botones de navegación.
+    personalization_tight = compact or viewport_h < 900
+    # V131: el lateral conserva una anchura mínima legible incluso en modo compacto.
+    width = 224 if compact else 230 if standard else 236
     _cfg(app.sidebar, width=width, fg_color=SIDEBAR)
 
     # El logotipo gráfico grande no vuelve al lateral; sólo queda la identidad
@@ -529,6 +518,7 @@ def _style_sidebar_mode(app, mode):
         'trends': 'btn_session_trends',
         'history': 'btn_alert_history',
         'themes': '_theme_toggle_button',
+        'updates': '_update_button',
     }
     active_attr = context_button.get(str(getattr(app, '_navigation_context', 'dashboard')).lower(), '_btn_summary')
     for attr in NAV:
@@ -538,8 +528,8 @@ def _style_sidebar_mode(app, mode):
         active = attr == active_attr
         _cfg(
             b,
-            height=30 if compact else 33 if standard else 34,
-            font=(FONT, 9 if compact else 10, 'bold'),
+            height=32 if compact else 33 if standard else 34,
+            font=(FONT, 10, 'bold'),
             corner_radius=8 if compact else 9,
             padx=10 if compact else 12,
             text_color=TEXT if active else SIDEBAR_INACTIVE_TEXT,
@@ -549,13 +539,14 @@ def _style_sidebar_mode(app, mode):
             border_color=SIDEBAR_ACTIVE_BORDER,
         )
         try:
-            b.pack_configure(padx=9 if compact else 11, pady=0 if compact else 1)
+            b.pack_configure(padx=10 if compact else 11, pady=0 if compact else 1)
         except Exception:
             pass
 
     card = getattr(app, '_agent_card', None)
     if card is not None:
-        target_h = 112 if compact else 122 if standard else 126
+        # En poco alto se recorta información secundaria, no los botones.
+        target_h = 100 if compact else 122 if standard else 126
         _cfg(card, height=target_h, corner_radius=11)
         try:
             card.pack_propagate(False)
@@ -566,9 +557,9 @@ def _style_sidebar_mode(app, mode):
                 current_side = ''
             if current_side != 'top':
                 card.pack_forget()
-                card.pack(side='top', fill='x', padx=9 if compact else 11, pady=(16 if compact else 20, 8))
+                card.pack(side='top', fill='x', padx=10 if compact else 11, pady=(12 if compact else 16, 7))
             else:
-                card.pack_configure(fill='x', padx=9 if compact else 11, pady=(16 if compact else 20, 8))
+                card.pack_configure(fill='x', padx=10 if compact else 11, pady=(12 if compact else 16, 7))
         except Exception:
             pass
         _cfg(getattr(app, '_agent_title', None), height=16, font=(FONT, 7 if compact else 8, 'bold'))
@@ -576,24 +567,76 @@ def _style_sidebar_mode(app, mode):
         _cfg(getattr(app, '_agent_status', None), height=16, font=(FONT, 8 if compact else 9, 'bold'))
         _cfg(getattr(app, '_agent_mode', None), height=14, font=(FONT, 6 if compact else 7, 'bold'))
         _cfg(getattr(app, '_agent_state', None), height=15, font=(FONT, 7 if compact else 8, 'bold'))
-        _cfg(getattr(app, '_agent_detail', None), height=16 if compact else 18, font=(FONT, 6 if compact else 7), wraplength=158 if compact else 174 if standard else 186, anchor='nw')
+        _cfg(getattr(app, '_agent_detail', None), height=18, font=(FONT, 7), wraplength=174 if standard else 186, anchor='nw')
         try:
-            app._agent_detail.grid(sticky='nsew')
+            if compact:
+                app._agent_detail.grid_remove()
+            else:
+                app._agent_detail.grid(sticky='nsew')
         except Exception:
             pass
 
-    theme_button = getattr(app, '_theme_toggle_button', None)
-    _cfg(theme_button, height=29 if compact else 31, corner_radius=8 if compact else 9)
-    try:
-        if theme_button is not None:
-            theme_button.pack_configure(side='top', fill='x', padx=10 if compact else 12, pady=(8 if compact else 10, 4 if compact else 5))
-    except Exception:
-        pass
+    # V133 — Personalización conserva dos acciones completas y recorta primero
+    # metadatos secundarios cuando el alto de la ventana es limitado. Esto evita
+    # que Actualizaciones quede pegado/cortado contra el borde inferior.
+    personal = getattr(app, '_personalization_block', None)
+    _cfg(personal, fg_color=SURFACE, border_color=BORDER, border_width=1, corner_radius=12)
+    _cfg(getattr(app, '_personalization_label', None), height=16, font=(FONT, 7 if compact else 8, 'bold'), text_color=MUTED)
+    _cfg(getattr(app, '_personalization_hint', None), height=13, font=(FONT, 7), text_color=MUTED)
+    _cfg(getattr(app, '_personalization_divider', None), fg_color=BORDER, height=1)
 
+    context = str(getattr(app, '_navigation_context', '') or '').lower()
+    for attr, label, key in (
+        ('_theme_toggle_button', '◉  Temas', 'themes'),
+        ('_update_button', '↻  Actualizaciones', 'updates'),
+    ):
+        button = getattr(app, attr, None)
+        active = context == key
+        _cfg(
+            button,
+            text=label,
+            height=33 if personalization_tight else 35,
+            corner_radius=9,
+            fg_color=SIDEBAR_ACTIVE_BG if active else 'transparent',
+            hover_color=SIDEBAR_ACTIVE_HOVER if active else SURFACE_2,
+            border_width=1 if active else 0,
+            border_color=SIDEBAR_ACTIVE_BORDER,
+            text_color=TEXT if active else SIDEBAR_INACTIVE_TEXT,
+            font=(FONT, 9 if compact else 10, 'bold'),
+            anchor='w',
+            padx=10 if compact else 11,
+        )
+
+    hint = getattr(app, '_personalization_hint', None)
+    divider = getattr(app, '_personalization_divider', None)
     ver = getattr(app, '_sidebar_version', None)
-    _cfg(ver, text=f'{VERSION_LABEL} · Cereon Technologies', font=(FONT, 6 if compact else 7), text_color=MUTED)
+    _cfg(ver, text=f'{VERSION_LABEL} · Cereon Technologies', font=(FONT, 7), text_color=MUTED)
     try:
-        ver.pack_configure(side='bottom', fill='x', padx=11 if compact else 14, pady=(3, 8 if compact else 10))
+        if personalization_tight:
+            # Conserva acciones a tamaño normal y retira únicamente metadatos
+            # secundarios cuando el alto disponible es limitado, incluso si el
+            # ancho todavía clasifica la ventana como 'standard'.
+            if hint is not None:
+                hint.pack_forget()
+            if divider is not None:
+                divider.pack_forget()
+            if ver is not None:
+                ver.pack_forget()
+        else:
+            theme_button = getattr(app, '_theme_toggle_button', None)
+            if hint is not None and not hint.winfo_manager():
+                hint.pack(fill='x', padx=12, pady=(0, 6), before=theme_button)
+            if divider is not None and not divider.winfo_manager():
+                divider.pack(fill='x', padx=10, pady=(2, 5))
+            if ver is not None and not ver.winfo_manager():
+                ver.pack(fill='x', padx=12, pady=(0, 8))
+        if personal is not None:
+            personal.pack_configure(
+                side='top',
+                fill='x',
+                padx=10 if personalization_tight else 11,
+                pady=(3, 5) if personalization_tight else (7, 7),
+            )
     except Exception:
         pass
 

@@ -1,6 +1,6 @@
 """Mantiene coherencia visual y una única cola de navegación del sidebar."""
 from __future__ import annotations
-from core.theme_manager import color as theme_color, role_color, get_theme_profile
+from core.theme_manager import color as theme_color, role_color
 from gui.render_polish import polish_widget_tree
 
 DESIGN_ID = 'COREPULSE_INTERNAL_NAV_STATE'
@@ -12,7 +12,7 @@ ACTIVE_BORDER = role_color('accent')
 ACTIVE_TEXT = role_color('text')
 INACTIVE_TEXT = role_color('text_2')
 HOVER = role_color('surface_2')
-ACTIONS = ('btn_benchmark', 'btn_diagnostic', 'btn_health_center', 'btn_cleanup', 'btn_tweaks', 'btn_network', 'btn_smart_alerts', 'btn_session_trends', 'btn_alert_history', '_theme_toggle_button')
+ACTIONS = ('btn_benchmark', 'btn_diagnostic', 'btn_health_center', 'btn_cleanup', 'btn_tweaks', 'btn_network', 'btn_smart_alerts', 'btn_session_trends', 'btn_alert_history', '_theme_toggle_button', '_update_button')
 CONTEXT_BUTTON = {
     'dashboard': '_btn_summary',
     'benchmark': 'btn_benchmark',
@@ -27,6 +27,7 @@ CONTEXT_BUTTON = {
     'trends': 'btn_session_trends',
     'history': 'btn_alert_history',
     'themes': '_theme_toggle_button',
+    'updates': '_update_button',
 }
 
 
@@ -58,24 +59,11 @@ def refresh_navigation_state(app, context=None):
             continue
         disabled = _is_disabled(button)
         active = attr == active_attr and not disabled
+        extra = {}
         if attr == '_theme_toggle_button':
-            # V126 — Temas permanece visible aunque no sea la vista activa.
-            # No se derivan tonos: se usan accent/accent_2 exactos del tema.
-            profile = get_theme_profile()
-            theme_text = role_color('text') if profile.get('appearance') == 'dark' else role_color('surface')
-            _cfg(
-                button,
-                text='◉  TEMAS',
-                fg_color=role_color('accent_2') if active else role_color('accent'),
-                hover_color=role_color('accent') if active else role_color('accent_2'),
-                text_color=theme_text,
-                border_width=2,
-                border_color=role_color('accent_2'),
-                corner_radius=11,
-                height=42,
-                anchor='center',
-            )
-            continue
+            extra = {'text': '◉  Temas', 'height': 35, 'font': ('Segoe UI', 10, 'bold'), 'padx': 11}
+        elif attr == '_update_button':
+            extra = {'text': '↻  Actualizaciones', 'height': 35, 'font': ('Segoe UI', 10, 'bold'), 'padx': 11}
         _cfg(
             button,
             fg_color=ACTIVE_BG if active else 'transparent',
@@ -85,6 +73,7 @@ def refresh_navigation_state(app, context=None):
             border_color=ACTIVE_BORDER,
             corner_radius=9,
             anchor='w',
+            **extra,
         )
     app._navigation_context = context
 
@@ -116,6 +105,7 @@ def _install_debounced_commands(app):
         'btn_session_trends': ('trends', lambda: app.open_session_trends_window()),
         'btn_alert_history': ('history', lambda: app.open_alert_history_window()),
         '_theme_toggle_button': ('themes', lambda: app.open_themes()),
+        '_update_button': ('updates', lambda: app.open_update_center()),
     }
     for attr, (key, callback) in routes.items():
         button = getattr(app, attr, None)

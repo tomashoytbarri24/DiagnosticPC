@@ -96,11 +96,27 @@ class App(ctk.CTk):
         return self.open_themes()
 
     def open_update_center(self):
-        """Abre el centro manual de GitHub Releases para pruebas internas."""
+        """Abre Actualizaciones como módulo interno, sin una segunda ventana."""
+        if not self.is_running:
+            return
+        host = None
         try:
-            from gui.update_dialog import show_update_dialog
-            return show_update_dialog(self)
+            host, reused = activate_internal_page(self, 'updates')
+            if reused and getattr(self, 'update_panel', None) is not None:
+                self._defer_ui_call(self.update_panel.refresh)
+                return self.update_panel
+            if host is None:
+                return None
+            from gui.update_dialog import UpdatePanel
+            panel = UpdatePanel(self, host)
+            self.update_panel = panel
+            if not commit_internal_page(self, 'updates', host, panel):
+                self.update_panel = None
+                return None
+            return panel
         except Exception as exc:
+            self.update_panel = None
+            abort_internal_page(self, 'updates', host)
             cp_error(self, 'Actualizaciones', f'No se pudo abrir el centro de actualizaciones:\n\n{exc}')
             return None
 

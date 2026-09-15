@@ -20,6 +20,7 @@ from core.battery_health import collect_battery_health, probe_battery_presence
 from core.visual_benchmark import run_visual_benchmark, visual_profile_info
 from core.benchmark_engine import run_benchmark_suite, benchmark_profile_info
 from core.sensor_diagnostics import build_sensor_diagnostics
+from core.corepulse_diagnostics import collect_corepulse_diagnostics
 from core.health_intelligence import build_health_intelligence
 from core.startup_analyzer import disable_startup_item, restore_startup_item
 from core.before_after import capture_metrics, save_snapshot, load_snapshots, compare, latest_operations
@@ -296,11 +297,15 @@ class HealthCenterPanel:
         ('summary', 'Estado general'), ('battery', 'Batería'),
         ('windows', 'Windows'), ('repair', 'Reparación'),
         ('history', 'Historial'), ('recovery', 'Recuperación'),
+        ('corepulse', 'Estado de CorePulse'),
     )
 
     def __init__(self, app, host, *, performance_only=False, external_scroll=None, benchmark_only=False):
         self.app = app; self.host = host; self._alive = True; self._visible = True; self._performance_only = bool(performance_only); self._benchmark_only = bool(benchmark_only); self._external_scroll = external_scroll; self._tab='performance' if self._performance_only else 'summary'; self._jobs=set()
         self._battery=None; self._startup=None; self._services=None; self._crashes=None; self._drivers=None; self._hw=None; self._restore=None
+        # V134 — autodiagnóstico de capacidades. Se calcula en background sólo
+        # al entrar a su módulo; la portada nunca bloquea por probes opcionales.
+        self._corepulse_diag=None
         self._seed_preloaded_battery_state()
         self._repair_diagnostic=None; self._repair_result=None; self._repair_progress=None; self.lbl_repair_progress=None
         self.btn_repair_diag=None; self.btn_repair_fix=None; self.repair_progress_bar=None
@@ -516,6 +521,14 @@ class HealthCenterPanel:
                 'eyebrow': 'Protección y rollback',
                 'title': 'Recuperación y rollback',
                 'subtitle': 'Protección antes de cambios delicados. CorePulse no habilita Restaurar sistema sin tu autorización.',
+            },
+            'corepulse': {
+                'button_text': 'Volver a Centro de salud',
+                'button_width': 186,
+                'button_command': lambda: self._select_tab('summary'),
+                'eyebrow': 'Compatibilidad del equipo actual',
+                'title': 'Estado de CorePulse',
+                'subtitle': 'Comprueba runtime, herramientas y sensores disponibles sin convertir capacidades N/A en fallos.',
             },
             'performance': {
                 'button_text': 'Volver a Centro de salud',
@@ -902,6 +915,11 @@ class HealthCenterPanel:
                 'bg': theme_color('#271733'), 'border': theme_color('#5c3d7d'),
                 'tags': ('Throttling', 'Benchmark', 'Perfiles')
             },
+            'CorePulse': {
+                'icon': '◆', 'category': 'Capacidades reales', 'accent': GREEN,
+                'bg': theme_color('#13271f'), 'border': theme_color('#245d43'),
+                'tags': ('Runtime', 'Sensores', 'Herramientas')
+            },
         }
         return profiles.get(title, {
             'icon': '•', 'category': 'Módulo', 'accent': TEXT2,
@@ -1070,6 +1088,7 @@ class HealthCenterPanel:
                 'repair': self._render_repair,
                 'history': self._render_history,
                 'recovery': self._render_recovery,
+                'corepulse': self._render_corepulse_diagnostics,
             }.get(self._tab, self._render_summary)
             renderer()
         except Exception:
@@ -1182,6 +1201,22 @@ class HealthCenterPanel:
         throttle_state = str(cpu.get('state') or 'N/A').upper()
         throttle_color = RED if throttle_state == 'CONFIRMED' else AMBER if throttle_state in ('SUSPECTED', 'WATCHING') else GREEN if throttle_state == 'NO_EVIDENCE' else MUTED
 
+        if isinstance(self._corepulse_diag, dict):
+            cp_ready = bool(self._corepulse_diag.get('ready'))
+            cp_counts = self._corepulse_diag.get('counts') or {}
+            cp_errors = int(cp_counts.get('ERROR') or 0)
+            cp_na = int(cp_counts.get('N/A') or 0)
+            if cp_ready:
+                corepulse_status = f'Núcleo listo · {cp_na} capacidad(es) N/A' if cp_na else 'Núcleo listo'
+                corepulse_tone = GREEN
+            else:
+                corepulse_status = f'{cp_errors} error(es) de núcleo' if cp_errors else 'Requiere atención'
+                corepulse_tone = RED
+        elif 'corepulse_diagnostics' in self._jobs:
+            corepulse_status, corepulse_tone = 'Comprobando capacidades…', CYAN
+        else:
+            corepulse_status, corepulse_tone = 'Sin comprobar', MUTED
+
         # V0.10.2.81w — La tarjeta Batería sólo existe cuando la presencia
         # de una batería física ya fue confirmada por una fuente real. En equipos
         # de escritorio la grilla se recompone automáticamente sin dejar huecos.
@@ -1193,6 +1228,11 @@ class HealthCenterPanel:
                 battery_status, battery_tone, lambda: self._select_tab('battery')
             ))
         module_specs.extend((
+            (
+                'CorePulse',
+                'Runtime, herramientas opcionales y sensores realmente disponibles en este equipo.',
+                corepulse_status, corepulse_tone, lambda: self._select_tab('corepulse')
+            ),
             (
                 'Windows',
                 'Inicio, servicios, estabilidad, eventos críticos y controladores.',
@@ -1224,6 +1264,140 @@ class HealthCenterPanel:
             row_index, column_index = divmod(index, 3)
             self._health_module_card(modules, row_index, column_index, *spec)
 
+
+    def _corepulse_state_style(self, state):
+        raw = str(state or 'N/A').upper()
+        return {
+            'AVAILABLE': ('Disponible', GREEN),
+            'PARTIAL': ('Parcial', AMBER),
+            'ERROR': ('Error', RED),
+            'INFO': ('Info', CYAN),
+            'N/A': ('N/A', MUTED),
+        }.get(raw, ('N/A', MUTED))
+
+    def _corepulse_runtime_context(self):
+        agent = getattr(self.app, 'realtime_agent', None)
+        return {
+            'agent_running': bool(getattr(agent, 'running', False)),
+            'telemetry_snapshot': bool(getattr(self.app, 'latest_telemetry', {}) or {}),
+        }
+
+    def _load_corepulse_diagnostics(self, force=False):
+        if force:
+            self._corepulse_diag = None
+        if 'corepulse_diagnostics' in self._jobs:
+            return False
+        snap = copy.deepcopy(getattr(self.app, 'latest_telemetry', {}) or {})
+        context = self._corepulse_runtime_context()
+        def work():
+            return collect_corepulse_diagnostics(snap, runtime_context=context, persist=True)
+        def done(result, error):
+            if isinstance(result, dict):
+                self._corepulse_diag = result
+            else:
+                self._corepulse_diag = {
+                    'ready': False, 'overall_state': 'ERROR',
+                    'title': 'No se pudo completar el autodiagnóstico',
+                    'counts': {'ERROR': 1}, 'runtime': [], 'optional': [], 'sensors': [],
+                    'note': error or 'El detalle técnico fue registrado en los logs.',
+                }
+        started = self._async('corepulse_diagnostics', work, done)
+        if started:
+            self._request_render(1)
+        return started
+
+    def _corepulse_diag_row(self, parent, item):
+        state_text, tone = self._corepulse_state_style(item.get('state'))
+        row = ctk.CTkFrame(parent, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=8)
+        row.pack(fill='x', padx=12, pady=4)
+        row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            row, text=str(item.get('label') or 'Capacidad'), font=(FONT, 9, 'bold'),
+            text_color=TEXT, anchor='w', justify='left'
+        ).grid(row=0, column=0, sticky='ew', padx=(11, 8), pady=(8, 1))
+        badge = ctk.CTkFrame(row, fg_color='transparent', border_width=1, border_color=tone, corner_radius=999)
+        badge.grid(row=0, column=1, sticky='e', padx=(6, 11), pady=(6, 1))
+        ctk.CTkLabel(badge, text=state_text, font=(FONT, 8, 'bold'), text_color=tone).pack(padx=8, pady=2)
+        detail = str(item.get('detail') or 'Sin detalle adicional.')
+        ctk.CTkLabel(
+            row, text=detail, font=(FONT, 8), text_color=MUTED, anchor='w',
+            justify='left', wraplength=900
+        ).grid(row=1, column=0, columnspan=2, sticky='ew', padx=11, pady=(1, 8))
+        return row
+
+    def _render_corepulse_diagnostics(self):
+        self._title(
+            'Estado de CorePulse',
+            'Comprueba qué puede usar CorePulse en este equipo. N/A significa no instalado, no presente o no expuesto; no equivale a un fallo.'
+        )
+        data = self._corepulse_diag
+        if data is None:
+            self._loading('Comprobando runtime, herramientas y sensores…')
+            if 'corepulse_diagnostics' not in self._jobs:
+                self._load_corepulse_diagnostics()
+            return
+
+        ready = bool(data.get('ready'))
+        counts = data.get('counts') or {}
+        available = int(counts.get('AVAILABLE') or 0)
+        partial = int(counts.get('PARTIAL') or 0)
+        na_count = int(counts.get('N/A') or 0)
+        errors = int(counts.get('ERROR') or 0)
+        sensor_ok = int(data.get('sensor_metrics_available') or 0)
+        sensor_total = int(data.get('sensor_metrics_total') or 0)
+
+        hero = self._card(); hero.pack(fill='x', padx=8, pady=(4, 8))
+        top = ctk.CTkFrame(hero, fg_color='transparent'); top.pack(fill='x', padx=14, pady=(12, 6))
+        ctk.CTkLabel(
+            top, text=str(data.get('title') or ('Núcleo listo' if ready else 'Requiere atención')),
+            font=(FONT, 16, 'bold'), text_color=GREEN if ready else RED, anchor='w'
+        ).pack(side='left', fill='x', expand=True)
+        self._button(top, 'Actualizar diagnóstico', lambda: self._load_corepulse_diagnostics(force=True), variant='secondary', height=30).pack(side='right')
+        ctk.CTkLabel(
+            hero, text='Política REAL_OR_NA · las capacidades opcionales ausentes se muestran como N/A y no reducen ninguna “salud”.',
+            font=(FONT, 9), text_color=MUTED, anchor='w', justify='left', wraplength=1040
+        ).pack(fill='x', padx=14, pady=(0, 11))
+
+        stats = ctk.CTkFrame(self.body, fg_color='transparent'); stats.pack(fill='x', padx=5, pady=(0, 8))
+        for col in range(4):
+            stats.grid_columnconfigure(col, weight=1, uniform='corepulse_diag_stats')
+        stat_specs = (
+            ('NÚCLEO', 'Listo' if ready else 'Error', 'Dependencias obligatorias', GREEN if ready else RED),
+            ('CAPACIDADES', str(available), f'{partial} parcial · {na_count} N/A', CYAN),
+            ('SENSORES', f'{sensor_ok}/{sensor_total}' if sensor_total else 'N/A', 'Lecturas certificadas disponibles', GREEN if sensor_ok and sensor_total else MUTED),
+            ('ERRORES', str(errors), 'Sólo fallos de comprobaciones reales', RED if errors else GREEN),
+        )
+        for col, (title, value, detail, tone) in enumerate(stat_specs):
+            card = ctk.CTkFrame(stats, fg_color=CARD, border_width=1, border_color=BORDER, corner_radius=9)
+            card.grid(row=0, column=col, sticky='nsew', padx=5, pady=0)
+            ctk.CTkLabel(card, text=title, font=(FONT, 8, 'bold'), text_color=MUTED, anchor='w').pack(fill='x', padx=12, pady=(10, 2))
+            ctk.CTkLabel(card, text=value, font=(FONT, 20, 'bold'), text_color=tone, anchor='w').pack(fill='x', padx=12)
+            ctk.CTkLabel(card, text=detail, font=(FONT, 8), text_color=TEXT2, anchor='w', justify='left', wraplength=220).pack(fill='x', padx=12, pady=(2, 10))
+
+        sections = (
+            ('Núcleo y dependencias obligatorias', data.get('runtime') or []),
+            ('Herramientas y capacidades opcionales', data.get('optional') or []),
+            ('Sensores expuestos por este equipo', data.get('sensors') or []),
+        )
+        for title, items in sections:
+            card = self._card(); card.pack(fill='x', padx=8, pady=6)
+            ctk.CTkLabel(card, text=title, font=(FONT, 11, 'bold'), text_color=TEXT, anchor='w').pack(fill='x', padx=13, pady=(11, 4))
+            if items:
+                for item in items:
+                    if isinstance(item, dict):
+                        self._corepulse_diag_row(card, item)
+            else:
+                ctk.CTkLabel(card, text='No hay datos disponibles para esta sección.', font=(FONT, 9), text_color=MUTED, anchor='w').pack(fill='x', padx=13, pady=(4, 12))
+            ctk.CTkFrame(card, height=5, fg_color='transparent').pack()
+
+        report_path = str(data.get('report_path') or '').strip()
+        footer = self._card(); footer.pack(fill='x', padx=8, pady=(6, 12))
+        ctk.CTkLabel(footer, text='Informe técnico', font=(FONT, 10, 'bold'), text_color=TEXT).pack(anchor='w', padx=13, pady=(10, 2))
+        ctk.CTkLabel(
+            footer,
+            text=(f'Guardado en: {report_path}' if report_path else 'El informe no pudo guardarse en esta sesión.'),
+            font=(FONT, 8), text_color=MUTED, anchor='w', justify='left', wraplength=1020
+        ).pack(fill='x', padx=13, pady=(0, 10))
 
     def _render_battery(self):
         self._title('Salud de batería','Capacidad, desgaste, ciclos y autonomía usando únicamente fuentes disponibles del sistema.')
@@ -4799,6 +4973,8 @@ class HealthCenterPanel:
             self._load_hw_compare()
         if key=='recovery' and self._restore is None:
             self._async('restore',restore_point_status,lambda r,e:setattr(self,'_restore',r or {'error':e}))
+        if key == 'corepulse' and self._corepulse_diag is None:
+            self._load_corepulse_diagnostics()
 
     def _load_hw_compare(self):
         cache = getattr(self.app, 'health_center_hardware_cache', None)
