@@ -18,6 +18,37 @@ _owners = weakref.WeakSet()
 _dirty = weakref.WeakKeyDictionary()
 _original_update_dimensions_event = None
 _MISSING = object()
+_frame_callbacks = weakref.WeakKeyDictionary()
+FRAME_INTERVAL_MS = 16
+
+
+def _schedule_frame(owner):
+    """Pinta el tamaño reciente una vez por frame, incluso durante el gesto.
+
+    Esperar al debounce final dejaba el canvas CTk con el tamaño anterior
+    mientras Windows ya había maximizado/restaurado los controles nativos.
+    """
+    if owner is None or owner in _frame_callbacks:
+        return
+    reference = weakref.ref(owner)
+    def paint():
+        window = reference()
+        if window is not None:
+            _frame_callbacks.pop(window, None)
+            flush(owner=window)
+    try:
+        _frame_callbacks[owner] = owner.after(FRAME_INTERVAL_MS, paint)
+    except (AttributeError, RuntimeError):
+        pass
+
+
+def _cancel_frame(owner):
+    callback = _frame_callbacks.pop(owner, None)
+    if callback is not None:
+        try:
+            owner.after_cancel(callback)
+        except Exception:
+            pass
 
 
 def _resolve_base_class():
@@ -51,6 +82,7 @@ def _patched_update_dimensions_event(self, event):
         if old and old[1].get('no_color_updates') is False:
             kwargs['no_color_updates'] = False
         _dirty[self] = (args, dict(kwargs), weakref.ref(root) if root is not None else None)
+        _schedule_frame(root)
 
     self._draw = defer_draw
     try:
@@ -93,6 +125,9 @@ def set_active(active, *, owner=None):
     else:
         _owners.discard(owner)
     if not active:
+        for window in list(_frame_callbacks):
+            if owner is None or owner is window:
+                _cancel_frame(window)
         flush(owner=owner)
 
 
@@ -113,6 +148,7 @@ def flush(*, owner=None):
 def release(owner):
     """Retira la ventana al cerrarla, sin redibujar widgets en destrucción."""
     _owners.discard(owner)
+    _cancel_frame(owner)
     for widget, (_, _, root_ref) in list(_dirty.items()):
         if root_ref is not None and root_ref() is owner:
             _dirty.pop(widget, None)

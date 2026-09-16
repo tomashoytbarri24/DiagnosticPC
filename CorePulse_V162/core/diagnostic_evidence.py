@@ -1,6 +1,7 @@
 """Adaptadores puros de evidencia existente; no consultan ni simulan sensores."""
 import copy
 import math
+import re
 
 
 def number(value):
@@ -52,9 +53,20 @@ def active_gpu(gpus):
     return candidates[0]
 
 
+def normalize_gpu_identity(value):
+    """Normaliza sólo sufijos de renderer conocidos; no adivina entre adaptadores."""
+    text = re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+    # OpenGL en Windows puede añadir capacidades del bus/CPU al nombre exacto
+    # del adaptador (p. ej. ``/PCIe/SSE2``). Se quitan únicamente sufijos
+    # técnicos conocidos; el nombre base debe seguir coincidiendo de forma única.
+    text = re.sub(r"/(?:pcie/)?sse(?:2|3|4(?:\.1|\.2)?)$", "", text)
+    text = re.sub(r"/(?:pcie|sse(?:2|3|4(?:\.1|\.2)?))$", "", text)
+    return text.strip()
+
+
 def gpu_for_renderer(gpus, renderer):
-    """Sólo enlaza un renderer a sensores con identidad exacta normalizada."""
-    name = str(renderer or '').strip().casefold()
+    """Enlaza el renderer a una sola GPU tras normalización conservadora."""
+    name = normalize_gpu_identity(renderer)
     matches = [g for g in gpus if isinstance(g, dict) and name
-               and str(g.get('name') or '').strip().casefold() == name]
+               and normalize_gpu_identity(g.get('name')) == name]
     return matches[0] if len(matches) == 1 else {}

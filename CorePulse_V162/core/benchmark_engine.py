@@ -35,7 +35,7 @@ BENCHMARK_PROFILES = {
         'ram_seconds': 4.0,
         'ram_size_cap_mb': 128,
         'ssd_size_mb': 192,
-        'gpu_seconds': 6.0,
+        'gpu_seconds': 12.0,
     },
     'standard': {
         'label': 'Estándar',
@@ -45,7 +45,7 @@ BENCHMARK_PROFILES = {
         'ram_seconds': 8.0,
         'ram_size_cap_mb': 256,
         'ssd_size_mb': 512,
-        'gpu_seconds': 12.0,
+        'gpu_seconds': 24.0,
     },
     'extended': {
         'label': 'Extendido',
@@ -55,11 +55,19 @@ BENCHMARK_PROFILES = {
         'ram_seconds': 18.0,
         'ram_size_cap_mb': 384,
         'ssd_size_mb': 1024,
-        'gpu_seconds': 28.0,
+        'gpu_seconds': 48.0,
     },
 }
 
 BENCHMARK_COMPONENTS = ('cpu', 'ram', 'ssd', 'gpu')
+
+# V162: identificadores explícitos de metodología. El historial sólo debe
+# comparar sesiones que midieron realmente lo mismo.
+BENCHMARK_METHOD_ID = 'COREPULSE_BENCHMARK_2'
+CPU_METHOD_ID = 'COREPULSE_CPU_SHA256_V2'
+RAM_METHOD_ID = 'COREPULSE_RAM_SUSTAINED_COPY_V2'
+SSD_METHOD_ID = 'COREPULSE_SSD_SEQUENTIAL_IO_V2'
+GPU_METHOD_ID = 'COREPULSE_GPU_VISUAL_MULTIPHASE_V2'
 
 
 def benchmark_profile_info(profile: str = 'standard') -> Dict[str, Any]:
@@ -199,7 +207,7 @@ def benchmark_cpu(
         return _result(
             'CPU', single_ops, 'SHA256 ops/s', 'CorePulse SHA-256 workload', duration,
             single_thread_ops_s=single_ops, multi_thread_ops_s=None, threads=1,
-            throughput_mbps=single_ops * (len(block) / (1024 * 1024)), status='SAFETY_STOP',
+            throughput_mbps=single_ops * (len(block) / (1024 * 1024)), status='SAFETY_STOP', benchmark_method=CPU_METHOD_ID,
         )
 
     _safe_progress(progress_callback, 0.30, 'CPU · multinúcleo', f'Carga concurrente en {worker_count} hilos')
@@ -238,6 +246,7 @@ def benchmark_cpu(
         block_kb=len(block) // 1024,
         throughput_mbps=throughput,
         iterations=multi_count,
+        benchmark_method=CPU_METHOD_ID,
         status='SAFETY_STOP' if callable(stop_check) and stop_check() else 'OK',
     )
 
@@ -276,7 +285,7 @@ def benchmark_ram(
             frac = min(1.0, completed_rounds / rounds)
         else:
             frac = min(1.0, elapsed / target_seconds)
-        _safe_progress(progress_callback, frac, 'RAM · ancho de banda', f'{copied_mb / 1024.0:.1f} GB copiados')
+        _safe_progress(progress_callback, frac, 'RAM · copia sostenida', f'{copied_mb / 1024.0:.1f} GB copiados')
         if callable(stop_check) and stop_check():
             break
         if target_seconds is None:
@@ -288,6 +297,7 @@ def benchmark_ram(
     bandwidth = copied_mb / duration
     return _result(
         'RAM', bandwidth, 'MB/s', 'CorePulse sustained memory copy', duration,
+        benchmark_method=RAM_METHOD_ID,
         transferred_mb=copied_mb,
         buffer_mb=size_mb,
         rounds=completed_rounds,
@@ -307,6 +317,105 @@ def _adaptive_ssd_size(requested_mb: int, base: Path) -> int:
         return requested_mb
 
 
+def _benchmark_ssd_windows_uncached(path: Path, actual_mb: int, chunk_bytes: int, progress_callback=None, stop_check=None):
+    """E/S secuencial Windows con NO_BUFFERING + WRITE_THROUGH.
+
+    VirtualAlloc garantiza un buffer alineado a página y el tamaño de bloque es
+    múltiplo de 4 KiB. Si el dispositivo/controlador rechaza esta ruta, el
+    llamador conserva un fallback explícitamente marcado como cacheable.
+    """
+    if platform.system() != 'Windows':
+        raise RuntimeError('Direct I/O sólo disponible en Windows')
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    HANDLE = wintypes.HANDLE
+    INVALID = ctypes.c_void_p(-1).value
+    GENERIC_READ, GENERIC_WRITE = 0x80000000, 0x40000000
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_SHARE_DELETE = 1, 2, 4
+    CREATE_ALWAYS, OPEN_EXISTING = 2, 3
+    FILE_ATTRIBUTE_TEMPORARY = 0x00000100
+    FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000
+    FILE_FLAG_NO_BUFFERING = 0x20000000
+    FILE_FLAG_WRITE_THROUGH = 0x80000000
+    MEM_COMMIT, MEM_RESERVE, MEM_RELEASE, PAGE_READWRITE = 0x1000, 0x2000, 0x8000, 0x04
+
+    kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
+                                     wintypes.DWORD, wintypes.DWORD, HANDLE]
+    kernel32.CreateFileW.restype = HANDLE
+    kernel32.WriteFile.argtypes = [HANDLE, ctypes.c_void_p, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+    kernel32.WriteFile.restype = wintypes.BOOL
+    kernel32.ReadFile.argtypes = [HANDLE, wintypes.LPVOID, wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), wintypes.LPVOID]
+    kernel32.ReadFile.restype = wintypes.BOOL
+    kernel32.FlushFileBuffers.argtypes = [HANDLE]
+    kernel32.FlushFileBuffers.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.VirtualAlloc.argtypes = [wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD, wintypes.DWORD]
+    kernel32.VirtualAlloc.restype = wintypes.LPVOID
+    kernel32.VirtualFree.argtypes = [wintypes.LPVOID, ctypes.c_size_t, wintypes.DWORD]
+    kernel32.VirtualFree.restype = wintypes.BOOL
+
+    flags = FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH
+    sharing = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+
+    def invalid_handle(value):
+        try:
+            raw = value if isinstance(value, int) else ctypes.cast(value, ctypes.c_void_p).value
+        except Exception:
+            raw = None
+        return raw in (None, INVALID)
+    buffer = kernel32.VirtualAlloc(None, chunk_bytes, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE)
+    if not buffer:
+        raise OSError(ctypes.get_last_error(), 'VirtualAlloc falló para buffer alineado')
+    handle = None
+    total_bytes = int(actual_mb) * 1024 * 1024
+    total_chunks = max(1, total_bytes // chunk_bytes)
+    written = read = 0
+    try:
+        seed = os.urandom(min(chunk_bytes, 1024 * 1024))
+        for offset in range(0, chunk_bytes, len(seed)):
+            ctypes.memmove(int(buffer) + offset, seed, min(len(seed), chunk_bytes - offset))
+        handle = kernel32.CreateFileW(str(path), GENERIC_WRITE, sharing, None, CREATE_ALWAYS, flags, None)
+        if invalid_handle(handle):
+            raise OSError(ctypes.get_last_error(), 'CreateFileW escritura directa falló')
+        start_w = time.perf_counter()
+        for index in range(total_chunks):
+            done = wintypes.DWORD(0)
+            if not kernel32.WriteFile(handle, buffer, chunk_bytes, ctypes.byref(done), None) or done.value != chunk_bytes:
+                raise OSError(ctypes.get_last_error(), 'WriteFile directo falló')
+            written += int(done.value)
+            _safe_progress(progress_callback, 0.48 * ((index + 1) / total_chunks), 'SSD · escritura directa', f'{written / (1024*1024):.0f} / {actual_mb} MB')
+            if callable(stop_check) and stop_check():
+                break
+        if not kernel32.FlushFileBuffers(handle):
+            raise OSError(ctypes.get_last_error(), 'FlushFileBuffers falló')
+        write_duration = max(1e-6, time.perf_counter() - start_w)
+        kernel32.CloseHandle(handle); handle = None
+        if callable(stop_check) and stop_check():
+            return written, 0, write_duration, 0.0
+
+        handle = kernel32.CreateFileW(str(path), GENERIC_READ, sharing, None, OPEN_EXISTING, flags, None)
+        if invalid_handle(handle):
+            raise OSError(ctypes.get_last_error(), 'CreateFileW lectura directa falló')
+        start_r = time.perf_counter()
+        for _index in range(total_chunks):
+            done = wintypes.DWORD(0)
+            if not kernel32.ReadFile(handle, buffer, chunk_bytes, ctypes.byref(done), None):
+                raise OSError(ctypes.get_last_error(), 'ReadFile directo falló')
+            if not done.value:
+                break
+            read += int(done.value)
+            _safe_progress(progress_callback, 0.48 + 0.52 * min(1.0, read / max(1, total_bytes)), 'SSD · lectura directa', f'{read / (1024*1024):.0f} / {actual_mb} MB')
+            if callable(stop_check) and stop_check():
+                break
+        read_duration = max(1e-6, time.perf_counter() - start_r)
+        return written, read, write_duration, read_duration
+    finally:
+        if handle:
+            kernel32.CloseHandle(handle)
+        kernel32.VirtualFree(buffer, 0, MEM_RELEASE)
+
+
 def benchmark_ssd(
     target_dir: str | Path | None = None,
     size_mb: int = 96,
@@ -314,73 +423,82 @@ def benchmark_ssd(
     progress_callback: ProgressCallback = None,
     stop_check: Optional[Callable[[], bool]] = None,
 ):
-    """E/S secuencial con archivo temporal, flush y fsync antes de la lectura."""
+    """E/S secuencial real; en Windows prefiere I/O directo resistente a caché."""
     base = Path(target_dir) if target_dir else Path(tempfile.gettempdir())
     base.mkdir(parents=True, exist_ok=True)
     size_mb = _adaptive_ssd_size(size_mb, base)
     path = base / f'corepulse_bench_{os.getpid()}_{threading.get_ident()}_{time.time_ns()}.bin'
     chunk_mb = 4
-    chunk = os.urandom(chunk_mb * 1024 * 1024)
+    chunk_bytes = chunk_mb * 1024 * 1024
     total_chunks = max(1, size_mb // chunk_mb)
     actual_mb = total_chunks * chunk_mb
-    write_start = time.perf_counter()
-    written_bytes = 0
+    direct_error = None
     try:
+        if platform.system() == 'Windows':
+            try:
+                written, read, write_duration, read_duration = _benchmark_ssd_windows_uncached(
+                    path, actual_mb, chunk_bytes, progress_callback, stop_check,
+                )
+                write_mb = written / (1024 * 1024)
+                read_mb = read / (1024 * 1024)
+                if callable(stop_check) and stop_check():
+                    return _result(
+                        'SSD', None, 'MB/s', 'CorePulse Windows unbuffered sequential I/O', write_duration + read_duration,
+                        benchmark_method=SSD_METHOD_ID, write_mbps=(write_mb / write_duration) if write_duration else None,
+                        read_mbps=(read_mb / read_duration) if read_duration and read_mb else None,
+                        size_mb=write_mb, path_root=str(base.anchor or base), status='SAFETY_STOP',
+                        io_mode='WINDOWS_NO_BUFFERING_WRITE_THROUGH', cache_resistant=True,
+                    )
+                return _result(
+                    'SSD', write_mb / write_duration, 'MB/s write', 'CorePulse Windows unbuffered sequential I/O',
+                    write_duration + read_duration, benchmark_method=SSD_METHOD_ID,
+                    write_mbps=write_mb / write_duration, read_mbps=read_mb / read_duration,
+                    size_mb=write_mb, path_root=str(base.anchor or base), status='OK',
+                    io_mode='WINDOWS_NO_BUFFERING_WRITE_THROUGH', cache_resistant=True,
+                )
+            except Exception as exc:
+                direct_error = f'{type(exc).__name__}: {exc}'
+
+        # Fallback compatible: sigue siendo I/O real, pero se etiqueta como
+        # potencialmente cacheable para no confundirlo con la ruta directa.
+        chunk = os.urandom(chunk_bytes)
+        write_start = time.perf_counter()
+        written_bytes = 0
         with open(path, 'wb', buffering=0) as f:
             for index in range(total_chunks):
                 written_bytes += f.write(chunk)
                 if index % 4 == 0 or index + 1 == total_chunks:
-                    _safe_progress(
-                        progress_callback,
-                        0.48 * ((index + 1) / total_chunks),
-                        'SSD · escritura secuencial',
-                        f'{(index + 1) * chunk_mb} / {actual_mb} MB',
-                    )
+                    _safe_progress(progress_callback, 0.48 * ((index + 1) / total_chunks), 'SSD · escritura secuencial', f'{(index + 1) * chunk_mb} / {actual_mb} MB')
                 if callable(stop_check) and stop_check():
                     break
-            f.flush()
-            os.fsync(f.fileno())
+            f.flush(); os.fsync(f.fileno())
         write_duration = max(1e-6, time.perf_counter() - write_start)
-
         if callable(stop_check) and stop_check():
             return _result(
                 'SSD', None, 'MB/s', 'CorePulse sequential file I/O', write_duration,
-                write_mbps=(written_bytes / (1024 * 1024)) / write_duration, read_mbps=None, size_mb=written_bytes / (1024 * 1024),
-                path_root=str(base.anchor or base), status='SAFETY_STOP',
+                benchmark_method=SSD_METHOD_ID, write_mbps=(written_bytes / (1024 * 1024)) / write_duration,
+                read_mbps=None, size_mb=written_bytes / (1024 * 1024), path_root=str(base.anchor or base), status='SAFETY_STOP',
+                io_mode='BUFFERED_FALLBACK', cache_resistant=False, direct_io_error=direct_error,
             )
-
-        read_start = time.perf_counter()
-        total = 0
+        read_start = time.perf_counter(); total = 0
         with open(path, 'rb', buffering=0) as f:
             while True:
-                data = f.read(chunk_mb * 1024 * 1024)
-                if not data:
-                    break
+                data = f.read(chunk_bytes)
+                if not data: break
                 total += len(data)
-                _safe_progress(
-                    progress_callback,
-                    0.48 + 0.52 * min(1.0, total / max(1, actual_mb * 1024 * 1024)),
-                    'SSD · lectura secuencial',
-                    f'{total / (1024 * 1024):.0f} / {actual_mb} MB',
-                )
-                if callable(stop_check) and stop_check():
-                    break
+                _safe_progress(progress_callback, 0.48 + 0.52 * min(1.0, total / max(1, actual_mb * 1024 * 1024)), 'SSD · lectura secuencial', f'{total / (1024 * 1024):.0f} / {actual_mb} MB')
+                if callable(stop_check) and stop_check(): break
         read_duration = max(1e-6, time.perf_counter() - read_start)
         read_mb = total / (1024 * 1024)
         return _result(
-            'SSD', actual_mb / write_duration, 'MB/s write', 'CorePulse sequential file I/O',
-            write_duration + read_duration,
-            write_mbps=actual_mb / write_duration,
-            read_mbps=read_mb / read_duration,
-            size_mb=actual_mb,
-            path_root=str(base.anchor or base),
-            status='SAFETY_STOP' if callable(stop_check) and stop_check() else 'OK',
+            'SSD', actual_mb / write_duration, 'MB/s write', 'CorePulse sequential file I/O', write_duration + read_duration,
+            benchmark_method=SSD_METHOD_ID, write_mbps=actual_mb / write_duration, read_mbps=read_mb / read_duration,
+            size_mb=actual_mb, path_root=str(base.anchor or base), status='SAFETY_STOP' if callable(stop_check) and stop_check() else 'OK',
+            io_mode='BUFFERED_FALLBACK', cache_resistant=False, direct_io_error=direct_error,
         )
     finally:
-        try:
-            path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        try: path.unlink(missing_ok=True)
+        except Exception: pass
 
 
 def _benchmark_gpu_opengl(
@@ -638,6 +756,32 @@ def benchmark_gpu(
         )
 
 
+def _visual_gpu_result(profile, *, progress_callback=None, telemetry_sampler=None, cancel_check=None):
+    """Adapta el benchmark GPU visual canónico al contrato de la suite."""
+    from core.visual_benchmark import run_visual_benchmark
+    visual = run_visual_benchmark(
+        profile, components=['gpu'], progress_callback=progress_callback,
+        telemetry_sampler=telemetry_sampler, cancel_check=cancel_check,
+    )
+    visual = visual if isinstance(visual, dict) else {}
+    status = str(visual.get('status') or 'ERROR').upper()
+    fps = _float(visual.get('frames_per_s'))
+    result = _result(
+        'GPU', fps, 'FPS', str(visual.get('provider') or 'CorePulse Visual Hardware Benchmark · Multi-phase'),
+        _float(visual.get('duration_s')) or 0.0,
+        benchmark_method=GPU_METHOD_ID, status=status,
+        reason=visual.get('reason'), renderer=visual.get('renderer'), vendor=visual.get('vendor'), gl_version=visual.get('gl_version'),
+        frames=visual.get('frames'), frames_per_s=fps, fps_1pct_low=_float(visual.get('one_percent_low_fps')),
+        frametime_avg_ms=_float(visual.get('frametime_avg_ms')), frametime_p95_ms=_float(visual.get('frametime_p95_ms')),
+        frametime_p99_ms=_float(visual.get('frametime_p99_ms')), resolution=visual.get('resolution'),
+        requested_resolution=visual.get('requested_resolution'), vsync_disabled=visual.get('vsync_disabled'),
+        phases=f"{visual.get('measured_phase_count', 0)}/{visual.get('phase_count', 0)}",
+        phase_results=visual.get('phases') if isinstance(visual.get('phases'), list) else [],
+        visual_telemetry=visual.get('telemetry') if isinstance(visual.get('telemetry'), dict) else {},
+    )
+    return result
+
+
 def _map_progress(reporter: _SuiteReporter, start: float, end: float):
     span = max(0.0, end - start)
 
@@ -771,11 +915,9 @@ def run_benchmark_suite(
                     stop_check=should_stop,
                 )
             elif key == 'gpu':
-                gpu_seconds = float(profile_data['gpu_seconds'])
-                results[key] = benchmark_gpu(
-                    max(8, int(gpu_seconds + 4)), seconds=gpu_seconds,
-                    progress_callback=callback,
-                    stop_check=should_stop,
+                results[key] = _visual_gpu_result(
+                    profile_data['key'], progress_callback=callback, telemetry_sampler=telemetry_sampler,
+                    cancel_check=cancelled,
                 )
         except Exception as exc:
             results[key] = _result(key.upper(), status='ERROR', reason=f'{type(exc).__name__}: {exc}')
@@ -802,6 +944,8 @@ def run_benchmark_suite(
         'duration_s': duration,
         'profile': profile_data['key'].upper(),
         'profile_label': profile_data['label'],
+        'benchmark_method': BENCHMARK_METHOD_ID,
+        'component_methods': {'cpu': CPU_METHOD_ID, 'ram': RAM_METHOD_ID, 'ssd': SSD_METHOD_ID, 'gpu': GPU_METHOD_ID},
         'selected_components': selected,
         'cpu': results['cpu'],
         'ram': results['ram'],
@@ -837,5 +981,6 @@ def run_quick_suite(ssd_dir=None):
         'ram': benchmark_ram(128, 4),
         'ssd': benchmark_ssd(ssd_dir, 96),
         'gpu': benchmark_gpu(timeout=6, seconds=3.0),
+        'benchmark_method': 'COREPULSE_LEGACY_SHORT_BENCHMARK',
         'policy': 'LOCAL_SHORT_BENCHMARK_NO_REFERENCE_RANKING',
     }

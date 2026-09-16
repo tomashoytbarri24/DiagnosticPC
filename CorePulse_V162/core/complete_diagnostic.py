@@ -1,6 +1,6 @@
 """Orquestador del Diagnóstico Completo de CorePulse.
 
-V161 consolida, sin mezclar semánticas, cuatro tipos de evidencia:
+V162 conserva el flujo V161 y unifica la metodología del benchmark GPU entre el módulo Benchmark y Diagnóstico:
 - observación pasiva en escritorio (AdaptiveDiagnosticSession);
 - estado real de Windows/hardware;
 - telemetría observada durante el benchmark, sin carga adicional;
@@ -465,7 +465,7 @@ def _cancelled_result(result, hardware, phases, started, *, windows=None, stress
     output['findings'] = []
     phase_rows = [row for row in phases.values() if isinstance(row, dict)]
     output['complete_diagnostic'] = {
-        'version': '4.0-v161',
+        'version': '4.1-v162',
         'status': 'CANCELLED',
         'finalized': False,
         'duration_extension_s': round(time.perf_counter() - started, 3),
@@ -652,7 +652,7 @@ def run_complete_diagnostic(
     completed_phases = sum(1 for row in phase_rows if str(row.get('status') or '').upper() in {'OK', 'PARTIAL', 'SAFETY_STOP'})
     result['corepulse_version'] = VERSION_LABEL
     result['complete_diagnostic'] = {
-        'version': '4.0-v161',
+        'version': '4.1-v162',
         'finalized': True,
         'phases': phases,
         'phase_coverage': {'completed': completed_phases, 'total': len(phase_rows), 'partial': phase_partial},
@@ -671,6 +671,7 @@ def run_complete_diagnostic(
             'stress_and_benchmark_are_distinct': True,
             'automatic_stress': False,
             'load_source': 'BENCHMARK',
+            'benchmark_method_versioned': True,
             'stress_publishes_performance_score': False,
             'benchmark_has_external_ranking': False,
             'automatic_repairs': False,

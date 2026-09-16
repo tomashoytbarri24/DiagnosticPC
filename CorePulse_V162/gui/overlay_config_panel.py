@@ -76,6 +76,12 @@ class OverlayConfigPanel:
         self._alive = False
         self._visible = False
         self._stop_hotkey_recording(cancel=True)
+        if self._responsive_after_id is not None:
+            try:
+                self.root.after_cancel(self._responsive_after_id)
+            except Exception:
+                pass
+            self._responsive_after_id = None
         if self._status_after_id is not None:
             try:
                 self.root.after_cancel(self._status_after_id)
@@ -85,6 +91,8 @@ class OverlayConfigPanel:
 
     def set_active(self, active):
         self._visible = bool(active)
+        if self._visible:
+            self._on_resize()
         if not self._visible and self._status_after_id is not None:
             try:
                 self.root.after_cancel(self._status_after_id)
@@ -146,7 +154,7 @@ class OverlayConfigPanel:
         )
         self.lbl_app.pack(side='left', padx=(16, 0))
         self.lbl_policy = ctk.CTkLabel(
-            service, text='REAL_FPS_OR_NA_ONLY', font=(FONT, 8, 'bold'),
+            service, text='FPS medidos · N/A sin datos', font=(FONT, 8, 'bold'),
             text_color=CYAN, anchor='w'
         )
         self.lbl_policy.pack(side='left', padx=(16, 0))
@@ -190,16 +198,16 @@ class OverlayConfigPanel:
             row = ctk.CTkFrame(
                 self.metrics_grid, fg_color=theme_color('#0a1725'),
                 border_width=1, border_color=theme_color('#17314a'), corner_radius=10,
-                height=48,
+                height=64,
             )
-            row.grid_propagate(False)
+            row.pack_propagate(False)
             labels = ctk.CTkFrame(row, fg_color='transparent')
             labels.pack(side='left', fill='both', expand=True, padx=(11, 4), pady=7)
             ctk.CTkLabel(
-                labels, text=title, font=(FONT, 9, 'bold'), text_color=TEXT, anchor='w'
+                labels, text=title, height=20, font=(FONT, 10, 'bold'), text_color=TEXT, anchor='w'
             ).pack(anchor='w')
             ctk.CTkLabel(
-                labels, text=detail, font=(FONT, 7), text_color=MUTED, anchor='w'
+                labels, text=detail, height=18, font=(FONT, 8), text_color=MUTED, anchor='w'
             ).pack(anchor='w', pady=(1, 0))
             ctk.CTkSwitch(
                 row, text='', width=40, variable=self.metric_vars[key],
@@ -231,7 +239,7 @@ class OverlayConfigPanel:
         )
         self.preview_title.pack(fill='x', padx=11, pady=(10, 3))
         self.preview_text = ctk.CTkLabel(
-            preview, text='', font=('Consolas', 8, 'bold'), text_color=TEXT,
+            preview, text='', font=('Consolas', 11, 'bold'), text_color=TEXT,
             anchor='w', justify='left'
         )
         self.preview_text.pack(fill='x', padx=11, pady=(0, 10))
@@ -254,6 +262,8 @@ class OverlayConfigPanel:
         controls.pack(fill='x', padx=12, pady=(0, 10))
         controls.grid_columnconfigure(0, weight=1, uniform='overlay_controls')
         controls.grid_columnconfigure(1, weight=1, uniform='overlay_controls')
+
+        self._control_sections = []
 
         # Diseño
         design = ctk.CTkFrame(controls, fg_color='transparent')
@@ -321,6 +331,10 @@ class OverlayConfigPanel:
         )
         self.btn_clear_hotkey.pack(side='left', padx=(6, 0))
 
+        self._control_sections = [design, scale, position, hotkey]
+        self._controls_grid = controls
+        self._controls_columns = None
+
         visual_footer = ctk.CTkFrame(self.visual, fg_color='transparent')
         visual_footer.pack(fill='x', padx=14, pady=(0, 12))
         self.hotkey_hint = ctk.CTkLabel(
@@ -338,7 +352,7 @@ class OverlayConfigPanel:
         self.body.pack(fill='x', expand=False, padx=14, pady=(0, 10))
 
         self.root.bind('<Configure>', self._on_resize, add='+')
-        self.root.after(80, self._apply_responsive_layout)
+        self._responsive_after_id = self.root.after(80, self._apply_responsive_layout)
         self._update_preview()
 
     def _toggle_advanced_settings(self):
@@ -353,8 +367,6 @@ class OverlayConfigPanel:
 
     def _on_resize(self, event=None):
         if not self._alive or (event is not None and getattr(event, 'widget', None) is not self.root):
-            return
-        if getattr(self.app, 'is_resizing', False):
             return
         try:
             width = int(self.root.winfo_width())
@@ -383,52 +395,56 @@ class OverlayConfigPanel:
         self._apply_responsive_layout()
 
     def _apply_responsive_layout(self):
+        if self._responsive_after_id is not None:
+            try:
+                self.root.after_cancel(self._responsive_after_id)
+            except Exception:
+                pass
         self._responsive_after_id = None
-        if not self._alive:
+        if not self._alive or not self._visible:
             return
-        try:
-            width = int(self.root.winfo_width())
-        except Exception:
-            width = 900
+        if getattr(self.app, 'is_resizing', False):
+            self._responsive_after_id = self.root.after(80, self._apply_responsive_layout)
+            return
+        width = int(self.root.winfo_width())
+        if width <= 1:
+            return
+        # CTk expresa geometría física; breakpoints en unidades lógicas para DPI.
+        logical_width = self.root._reverse_widget_scaling(width)
         self._last_responsive_width = width
-
-        metric_cols = 1 if width < 850 else 2
+        mode = 'columns' if logical_width >= 960 else 'stacked'
+        metric_width = logical_width * .60 if mode == 'columns' else logical_width
+        metric_cols = 2 if metric_width >= 520 else 1
         if metric_cols != self._metrics_columns:
             self._metrics_columns = metric_cols
             for col in range(2):
-                self.metrics_grid.grid_columnconfigure(col, weight=1, uniform='overlay_metrics')
+                self.metrics_grid.grid_columnconfigure(col, weight=1 if col < metric_cols else 0,
+                                                       minsize=0, uniform='overlay_metrics' if col < metric_cols else '')
             for idx, card in enumerate(self._metric_cards):
-                card.grid_forget()
-                if metric_cols == 1:
-                    card.grid(row=idx, column=0, sticky='ew', padx=3, pady=3)
-                else:
-                    row = idx // 2
-                    col = idx % 2
-                    span = 2 if idx == len(self._metric_cards) - 1 and len(self._metric_cards) % 2 else 1
-                    if span == 2:
-                        col = 0
-                    card.grid(row=row, column=col, columnspan=span, sticky='ew', padx=3, pady=3)
-
-        mode = 'stacked' if width < 960 else 'columns'
-        if mode == self._layout_mode:
-            return
-        self._layout_mode = mode
-        try:
-            self.overview.grid_forget()
-            self.visual.grid_forget()
-            if mode == 'stacked':
-                self.overview.grid_columnconfigure(0, weight=1)
-                self.overview.grid_columnconfigure(1, weight=1)
-                self.metrics.grid(row=0, column=0, columnspan=2, sticky='new', pady=(0, 8))
-                self.preview_card.grid(row=1, column=0, columnspan=2, sticky='new')
-            else:
-                self.metrics.grid(row=0, column=0, sticky='new', padx=(0, 6))
-                self.preview_card.grid(row=0, column=1, sticky='new', padx=(6, 0))
+                card.grid(row=idx // metric_cols, column=idx % metric_cols, columnspan=1,
+                          sticky='ew', padx=3, pady=3)
+        if mode != self._layout_mode:
+            self._layout_mode = mode
+            self.overview.grid_columnconfigure(0, weight=3 if mode == 'columns' else 1)
+            self.overview.grid_columnconfigure(1, weight=2 if mode == 'columns' else 0)
+            self.metrics.grid(row=0, column=0, columnspan=1, sticky='new',
+                              padx=(0, 6) if mode == 'columns' else 0, pady=0)
+            self.preview_card.grid(row=0 if mode == 'columns' else 1, column=1 if mode == 'columns' else 0,
+                                   columnspan=1, sticky='new', padx=(6, 0) if mode == 'columns' else 0,
+                                   pady=0 if mode == 'columns' else (8, 0))
             self.overview.grid(row=0, column=0, sticky='new')
             self.visual.grid(row=1, column=0, sticky='new', pady=(10, 0))
             self.body.grid_columnconfigure(0, weight=1)
-        except Exception:
-            pass
+        control_cols = 2 if logical_width >= 760 else 1
+        if control_cols != self._controls_columns:
+            self._controls_columns = control_cols
+            for col in range(2):
+                self._controls_grid.grid_columnconfigure(col, weight=1 if col < control_cols else 0,
+                    uniform='overlay_controls' if col < control_cols else '')
+            for idx, section in enumerate(self._control_sections):
+                section.grid(row=idx // control_cols, column=idx % control_cols, sticky='ew',
+                             padx=(0, 8) if control_cols == 2 and idx % 2 == 0 else 0, pady=(0, 10))
+        self.hotkey_hint.configure(wraplength=max(220, logical_width - 160))
 
     def _collect(self):
         try:
@@ -625,7 +641,7 @@ class OverlayConfigPanel:
             self.status_badge.configure(text='DETENIDO', text_color=MUTED)
             self.lbl_rtss.configure(text='RTSS: overlay detenido', text_color=DIM)
             self.lbl_app.configure(text='Juego detectado: N/A')
-            self.lbl_policy.configure(text='FPS: REAL_FPS_OR_NA_ONLY')
+            self.lbl_policy.configure(text='FPS medidos · N/A sin datos')
             self.btn_toggle.configure(text='Iniciar Overlay')
             return
         try:
@@ -639,7 +655,7 @@ class OverlayConfigPanel:
         self.status_badge.configure(text='ACTIVO' if available else 'ESPERANDO RTSS', text_color=GREEN if available else WARN)
         self.lbl_rtss.configure(text=f"RTSS: conectado · v{status.get('rtss_version')}" if available else f"RTSS: {error or 'no disponible'}", text_color=GREEN if available else WARN)
         self.lbl_app.configure(text=f"Juego detectado: {app_name or 'N/A'}")
-        self.lbl_policy.configure(text=f"FPS: {status.get('fps_policy') or 'REAL_FPS_OR_NA_ONLY'}")
+        self.lbl_policy.configure(text='FPS medidos · N/A sin datos')
         self.btn_toggle.configure(text='Detener Overlay')
 
     def _status_tick(self):

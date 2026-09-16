@@ -18,7 +18,7 @@ from PIL import Image, ImageTk, ImageDraw
 from core.theme_manager import color as theme_color
 from core.battery_health import collect_battery_health, probe_battery_presence
 from core.visual_benchmark import run_visual_benchmark, visual_profile_info
-from core.benchmark_engine import run_benchmark_suite, benchmark_profile_info
+from core.benchmark_engine import run_benchmark_suite, benchmark_profile_info, BENCHMARK_METHOD_ID
 from core.sensor_diagnostics import build_sensor_diagnostics
 from core.health_intelligence import build_health_intelligence
 from core.startup_analyzer import disable_startup_item, restore_startup_item
@@ -2044,7 +2044,7 @@ class HealthCenterPanel:
 
 
     def _benchmark_profile_label(self):
-        return visual_profile_info(self._benchmark_profile_key).get('label') or 'Estándar'
+        return visual_profile_info('standard').get('label') or 'Estándar'
 
     @staticmethod
     def _benchmark_profile_key_from_label(label):
@@ -2065,8 +2065,8 @@ class HealthCenterPanel:
         selected = self._benchmark_selected_components()
         if not selected:
             return 'Selecciona al menos un componente'
-        visual = visual_profile_info(self._benchmark_profile_key)
-        classic = benchmark_profile_info(self._benchmark_profile_key)
+        visual = visual_profile_info('standard')
+        classic = benchmark_profile_info('standard')
         seconds = 0.0
         if 'gpu' in selected:
             seconds += float(visual.get('seconds') or 0) + float(visual.get('warmup_seconds') or 0)
@@ -2115,7 +2115,7 @@ class HealthCenterPanel:
     def _on_benchmark_profile_change(self, label):
         if 'visual_benchmark' in self._jobs:
             return
-        self._benchmark_profile_key = self._benchmark_profile_key_from_label(label)
+        self._benchmark_profile_key = 'standard'
         self._refresh_benchmark_configuration_ui()
 
     def _on_benchmark_component_change(self, key, variable):
@@ -2139,44 +2139,19 @@ class HealthCenterPanel:
         ctk.CTkLabel(info, text='Benchmark de hardware', font=(FONT, 14, 'bold'), text_color=TEXT, anchor='w').pack(anchor='w')
         ctk.CTkLabel(
             info,
-            text='Configura qué quieres medir antes de iniciar. GPU usa una escena 3D pesada; CPU, RAM y SSD ejecutan cargas sostenidas independientes y medibles.',
+            text='Selecciona los componentes. Un único benchmark mide rendimiento real y observa temperatura, uso y frecuencia durante la medición.',
             font=(FONT, 9), text_color=MUTED, anchor='w', justify='left', wraplength=930,
         ).pack(anchor='w', pady=(2, 0))
 
-        # Paso 1: perfil. Tres opciones claras, sin iniciar nada al tocarlas.
-        profile_shell = ctk.CTkFrame(bench, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=10)
-        profile_shell.pack(fill='x', padx=12, pady=(0, 9))
-        top = ctk.CTkFrame(profile_shell, fg_color='transparent')
-        top.pack(fill='x', padx=12, pady=(10, 7))
-        ctk.CTkLabel(top, text='1 · Intensidad', font=(FONT, 10, 'bold'), text_color=TEXT2).pack(side='left')
-        ctk.CTkLabel(top, text='Más intensidad = más tiempo y mayor carga sostenida', font=(FONT, 8), text_color=MUTED).pack(side='right')
-        self._benchmark_profile_var = ctk.StringVar(value=self._benchmark_profile_label())
-        selector = ctk.CTkSegmentedButton(
-            profile_shell,
-            values=['Rápido', 'Estándar', 'Extendido'],
-            variable=self._benchmark_profile_var,
-            command=self._on_benchmark_profile_change,
-            height=34,
-            corner_radius=8,
-            fg_color=theme_color('#0b1726'),
-            selected_color=PURPLE,
-            selected_hover_color=theme_color('#7e22ce'),
-            unselected_color=theme_color('#0b1726'),
-            unselected_hover_color=theme_color('#17263a'),
-            text_color=TEXT,
-            font=(FONT, 9, 'bold'),
-        )
-        selector.pack(fill='x', padx=12, pady=(0, 10))
-        if 'visual_benchmark' in self._jobs:
-            try: selector.configure(state='disabled')
-            except Exception: pass
+        # Un único protocolo público de benchmark, con metodología estándar.
+        self._benchmark_profile_key = 'standard'
 
         # Paso 2: componentes. Cada interruptor controla una carga real distinta.
         comp_shell = ctk.CTkFrame(bench, fg_color=CARD2, border_width=1, border_color=BORDER, corner_radius=10)
         comp_shell.pack(fill='x', padx=12, pady=(0, 9))
         comp_head = ctk.CTkFrame(comp_shell, fg_color='transparent')
         comp_head.pack(fill='x', padx=12, pady=(10, 2))
-        ctk.CTkLabel(comp_head, text='2 · Qué medir', font=(FONT, 10, 'bold'), text_color=TEXT2, anchor='w').pack(side='left')
+        ctk.CTkLabel(comp_head, text='1 · Qué medir', font=(FONT, 10, 'bold'), text_color=TEXT2, anchor='w').pack(side='left')
         quick = ctk.CTkFrame(comp_head, fg_color='transparent')
         quick.pack(side='right')
         self._button(quick, 'Todos', lambda: self._set_all_benchmark_components(True), variant='ghost', height=26).pack(side='left', padx=(0, 5))
@@ -2190,7 +2165,7 @@ class HealthCenterPanel:
         grid.pack(fill='x', padx=8, pady=(0, 10))
         descriptions = {
             'gpu': ('GPU', 'Escena 3D: geometría, fill, texturas, shaders y compute.', PURPLE),
-            'cpu': ('CPU', 'SHA-256 sostenido: 1 hilo + multinúcleo.', CYAN),
+            'cpu': ('CPU', 'Rendimiento SHA-256: 1 hilo + multinúcleo.', CYAN),
             'ram': ('RAM', 'Copia continua de bloques grandes de memoria.', GREEN),
             'ssd': ('SSD', 'Escritura + flush + lectura secuencial de archivo temporal.', AMBER),
         }
@@ -2220,7 +2195,7 @@ class HealthCenterPanel:
         action.pack(fill='x', padx=12, pady=(0, 10))
         left = ctk.CTkFrame(action, fg_color='transparent')
         left.pack(side='left', fill='x', expand=True, padx=12, pady=10)
-        ctk.CTkLabel(left, text='3 · Ejecutar', font=(FONT, 10, 'bold'), text_color=TEXT).pack(anchor='w')
+        ctk.CTkLabel(left, text='2 · Ejecutar', font=(FONT, 10, 'bold'), text_color=TEXT).pack(anchor='w')
         self._benchmark_selection_label = ctk.CTkLabel(left, text=self._benchmark_estimated_text(), font=(FONT, 8, 'bold'), text_color=PURPLE, anchor='w')
         self._benchmark_selection_label.pack(anchor='w', pady=(2, 0))
         self._benchmark_start_button = ctk.CTkButton(
@@ -2241,7 +2216,7 @@ class HealthCenterPanel:
         note.pack(fill='x', padx=12, pady=(0, 10))
         ctk.CTkLabel(
             note,
-            text='Qué debes notar: la CPU/RAM/SSD se cargan de forma sostenida; la GPU abre una ventana 3D independiente. CorePulse registra temperatura, uso, frecuencia y resultados reales. Si Windows asigna la escena 3D a otra GPU, CorePulse lo indica en el resultado en vez de ocultarlo.',
+            text='El benchmark mide CPU, RAM y SSD; la GPU abre una ventana 3D independiente. No es una prueba de estrés dedicada. CorePulse registra temperatura, uso, frecuencia y resultados reales. Si Windows asigna la escena 3D a otra GPU, CorePulse lo indica en el resultado en vez de ocultarlo.',
             font=(FONT, 8), text_color=MUTED, anchor='w', justify='left', wraplength=1020,
         ).pack(fill='x', padx=12, pady=9)
 
@@ -2460,7 +2435,7 @@ class HealthCenterPanel:
         if not selected:
             messagebox.showwarning('CorePulse', 'Selecciona al menos un componente antes de iniciar el benchmark.')
             return
-        profile_key = str(self._benchmark_profile_key or 'standard').lower()
+        profile_key = 'standard'
         visual_profile = visual_profile_info(profile_key)
         classic_profile = benchmark_profile_info(profile_key)
         self._visual_benchmark_progress = 0.0
@@ -2487,8 +2462,10 @@ class HealthCenterPanel:
                 pass
 
         def telemetry_sample():
-            tele = copy.deepcopy(getattr(self.app, 'latest_telemetry', {}) or {})
-            return _benchmark_live_metrics(tele)
+            # V162: el renderer se conoce dentro del benchmark visual. Se entrega
+            # el snapshot completo para que sólo la GPU realmente asociada al
+            # renderer pueda aportar sensores; no se elige la primera GPU.
+            return copy.deepcopy(getattr(self.app, 'latest_telemetry', {}) or {})
 
         def work():
             started = time.perf_counter()
@@ -2556,7 +2533,8 @@ class HealthCenterPanel:
 
             now = time.time()
             combined = {
-                'kind': 'COREPULSE_BENCHMARK_SUITE_V125',
+                'kind': 'COREPULSE_BENCHMARK_SUITE_V162',
+                'benchmark_method': BENCHMARK_METHOD_ID,
                 'provider': 'CorePulse real hardware workloads',
                 'timestamp': now,
                 'duration_s': float(elapsed or 0.0),
@@ -2774,9 +2752,14 @@ class HealthCenterPanel:
         return self._benchmark_history_cache[:max(1, int(limit))]
 
     @staticmethod
-    def _benchmark_signature(profile, components):
+    def _benchmark_signature(profile, components, suite=None):
         normalized = tuple(sorted(str(x or '').strip().lower() for x in (components or []) if str(x or '').strip()))
-        return str(profile or '').strip().upper(), normalized
+        suite = suite if isinstance(suite, dict) else {}
+        method = str(suite.get('benchmark_method') or 'LEGACY_UNVERSIONED').strip().upper()
+        system = suite.get('system_suite') if isinstance(suite.get('system_suite'), dict) else {}
+        ssd = system.get('ssd') if isinstance(system.get('ssd'), dict) else {}
+        ssd_identity = (str(ssd.get('path_root') or '').strip().casefold(), str(ssd.get('io_mode') or 'LEGACY').strip().upper()) if 'ssd' in normalized else ('', '')
+        return str(profile or '').strip().upper(), normalized, method, ssd_identity
 
     def _benchmark_previous_equivalent(self, sessions):
         current = self._visual_bench if isinstance(self._visual_bench, dict) else {}
@@ -2784,7 +2767,7 @@ class HealthCenterPanel:
             return None
         current_sig = self._benchmark_signature(
             current.get('profile') or 'standard',
-            current.get('selected_components') or ['gpu', 'cpu', 'ram'],
+            current.get('selected_components') or ['gpu', 'cpu', 'ram'], current,
         )
         current_ts = _num(current.get('timestamp'))
         live = getattr(self.app, 'latest_telemetry', {}) or {}
@@ -2794,7 +2777,7 @@ class HealthCenterPanel:
             if not isinstance(session, dict):
                 continue
             suite = session.get('suite') if isinstance(session.get('suite'), dict) else {}
-            sig = self._benchmark_signature(session.get('profile') or suite.get('profile'), session.get('components') or ['gpu', 'cpu', 'ram'])
+            sig = self._benchmark_signature(session.get('profile') or suite.get('profile'), session.get('components') or ['gpu', 'cpu', 'ram'], suite)
             if sig != current_sig:
                 continue
             hardware = session.get('hardware') if isinstance(session.get('hardware'), dict) else {}

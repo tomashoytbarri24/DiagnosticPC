@@ -2,7 +2,7 @@
 
 Benchmark visual reproducible dividido en cargas reales de GPU, CPU y RAM:
 geometría, fill/fragmentos, texturas/VRAM, shaders programables, compute/GPGPU,
-CPU multinúcleo, ancho de banda de memoria y carga combinada. CorePulse mide
+CPU multinúcleo, copia sostenida de memoria y carga combinada. CorePulse mide
 FPS/frametime del bucle visible y cruza cada fase con telemetría real. No estima
 FPS ni sensores ausentes.
 """
@@ -17,8 +17,11 @@ import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
+from core.diagnostic_evidence import gpu_for_renderer, number
+
 ProgressCallback = Optional[Callable[[float, str, str], None]]
 TelemetrySampler = Optional[Callable[[], Dict[str, Any]]]
+CancelCheck = Optional[Callable[[], bool]]
 
 VISUAL_PROFILES = {
     # V125: los perfiles visuales dejan de ser una demo ligera. La carga GPU
@@ -119,6 +122,74 @@ def _float(value):
         return float(value) if value is not None else None
     except Exception:
         return None
+
+
+def _first_number(*values):
+    for value in values:
+        parsed = number(value)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _visual_telemetry_metrics(raw, renderer):
+    """Reduce un snapshot real al renderer que atiende el contexto OpenGL.
+
+    Si el llamador entrega el formato plano histórico, se conserva. Cuando
+    existe inventario ``_gpus``, sólo una coincidencia inequívoca con el
+    renderer puede aportar temperatura/uso/frecuencia de GPU.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    cpu = raw.get('_cpu') if isinstance(raw.get('_cpu'), dict) else {}
+    gpus = raw.get('_gpus') if isinstance(raw.get('_gpus'), list) else []
+    matched = gpu_for_renderer(gpus, renderer) if gpus else {}
+
+    def gpu_sensor_limit(kind):
+        if not matched:
+            return None
+        for row in matched.get('sensors') or []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get('name') or row.get('sensor_name') or '').casefold()
+            sensor_type = str(row.get('type') or row.get('sensor_type') or '').casefold()
+            value = _first_number(row.get('value'))
+            if value is None or not (20.0 <= value <= 150.0):
+                continue
+            if 'limit' not in name and 'critical' not in name:
+                continue
+            if 'temp' not in name and 'thermal' not in name and sensor_type != 'temperature':
+                continue
+            if kind == 'hotspot' and 'hot' in name:
+                return value
+            if kind == 'core' and 'hot' not in name:
+                return value
+        return None
+
+    # El formato plano sigue permitido para tests/llamadores antiguos, pero
+    # nunca sustituye una identidad de GPU cuando existe una lista detallada.
+    gpu_temp = _first_number(matched.get('temperature_c')) if matched else (None if gpus else _first_number(raw.get('gpu_temp')))
+    gpu_hotspot = _first_number(matched.get('hotspot_c')) if matched else (None if gpus else _first_number(raw.get('gpu_hotspot')))
+    gpu_usage = _first_number(matched.get('usage_percent')) if matched else (None if gpus else _first_number(raw.get('gpu_usage')))
+    gpu_vram_used = _first_number(matched.get('memory_used_mb')) if matched else (None if gpus else _first_number(raw.get('gpu_vram_used_mb')))
+    gpu_vram_pct = _first_number(matched.get('memory_usage_percent')) if matched else (None if gpus else _first_number(raw.get('gpu_vram_usage_percent')))
+
+    return {
+        'cpu_temp': _first_number(raw.get('cpu_temp'), cpu.get('package_temp_c'), cpu.get('core_max_temp_c'), cpu.get('core_average_temp_c')),
+        'cpu_tjmax_distance': _first_number(cpu.get('distance_to_tjmax_min_c'), raw.get('cpu_distance_to_tjmax_min_c'), raw.get('distance_to_tjmax_min_c')),
+        'cpu_ghz': _first_number(raw.get('cpu_ghz'), cpu.get('clock_avg_ghz'), cpu.get('clock_max_ghz')),
+        'cpu_usage': _first_number(raw.get('cpu_usage'), cpu.get('usage_percent'), cpu.get('total_load_percent')),
+        'ram_usage': _first_number(raw.get('ram_usage')),
+        'gpu_temp': gpu_temp,
+        'gpu_hotspot': gpu_hotspot,
+        'gpu_temp_limit': gpu_sensor_limit('core') if matched else (None if gpus else _first_number(raw.get('gpu_temp_limit'))),
+        'gpu_hotspot_limit': gpu_sensor_limit('hotspot') if matched else (None if gpus else _first_number(raw.get('gpu_hotspot_limit'))),
+        'gpu_usage': gpu_usage,
+        'gpu_vram_used_mb': gpu_vram_used,
+        'gpu_vram_usage_percent': gpu_vram_pct,
+        'gpu_sensor_match': bool(matched),
+        'gpu_sensor_name': str(matched.get('name') or '') if matched else None,
+    }
 
 
 def _telemetry_summary(samples):
@@ -228,7 +299,7 @@ def _build_wave_mesh(grid: int):
     return vertex_array, color_array, vertex_count
 
 
-def _run_windows_visual(profile_data, progress_callback: ProgressCallback, telemetry_sampler: TelemetrySampler, components=None):
+def _run_windows_visual(profile_data, progress_callback: ProgressCallback, telemetry_sampler: TelemetrySampler, components=None, cancel_check: CancelCheck = None):
     from ctypes import wintypes
 
     user32 = ctypes.windll.user32
@@ -1416,6 +1487,12 @@ void main() {
                 )
             if measurement_start is not None and now - measurement_start >= duration_target:
                 break
+            if callable(cancel_check):
+                try:
+                    if cancel_check():
+                        cancel_requested['value'] = True
+                except Exception:
+                    pass
             if cancel_requested['value'] or stop_reason:
                 break
 
@@ -1521,7 +1598,8 @@ void main() {
             if frame_end >= next_sample and callable(telemetry_sampler):
                 next_sample = frame_end + 0.45
                 try:
-                    sample = telemetry_sampler() or {}
+                    raw_sample = telemetry_sampler() or {}
+                    sample = _visual_telemetry_metrics(raw_sample, renderer)
                 except Exception:
                     sample = {}
                 if isinstance(sample, dict):
@@ -1536,6 +1614,8 @@ void main() {
                         'gpu_usage': sample.get('gpu_usage'),
                         'gpu_vram_used_mb': sample.get('gpu_vram_used_mb'),
                         'gpu_vram_usage_percent': sample.get('gpu_vram_usage_percent'),
+                        'gpu_sensor_match': sample.get('gpu_sensor_match'),
+                        'gpu_sensor_name': sample.get('gpu_sensor_name'),
                     }
                     samples.append(row)
                     if measurement_start is not None and render_phase_key in phase_samples:
@@ -1545,10 +1625,16 @@ void main() {
                     # La antigua regla CPU >= 96 °C abortaba equipos cuyo TjMax real
                     # era superior (tal como ocurrió en la grabación enviada).
                     cpu_distance = _float(row.get('cpu_tjmax_distance'))
+                    cpu_temp = _float(row.get('cpu_temp'))
                     if cpu_distance is not None:
                         cpu_safety_hits = cpu_safety_hits + 1 if cpu_distance <= 1.0 else 0
                         if cpu_safety_hits >= 2:
                             stop_reason = f'Seguridad térmica: CPU quedó a {cpu_distance:.1f} °C de su TjMax real'
+                    elif cpu_temp is not None:
+                        # Respaldo conservador sólo cuando el proveedor no expone TjMax.
+                        cpu_safety_hits = cpu_safety_hits + 1 if cpu_temp >= 96.0 else 0
+                        if cpu_safety_hits >= 2:
+                            stop_reason = f'Seguridad térmica: CPU alcanzó {cpu_temp:.1f} °C sin TjMax disponible'
                     else:
                         cpu_safety_hits = 0
 
@@ -1556,16 +1642,21 @@ void main() {
                     gpu_hotspot = _float(row.get('gpu_hotspot'))
                     gpu_temp_limit = _float(row.get('gpu_temp_limit'))
                     gpu_hotspot_limit = _float(row.get('gpu_hotspot_limit'))
+                    has_gpu_limit = gpu_temp_limit is not None or gpu_hotspot_limit is not None
                     gpu_at_limit = (
                         (gpu_temp is not None and gpu_temp_limit is not None and gpu_temp >= gpu_temp_limit)
                         or (gpu_hotspot is not None and gpu_hotspot_limit is not None and gpu_hotspot >= gpu_hotspot_limit)
                     )
+                    if not has_gpu_limit and gpu_temp is not None:
+                        gpu_at_limit = gpu_temp >= 92.0
                     gpu_safety_hits = gpu_safety_hits + 1 if gpu_at_limit else 0
                     if gpu_safety_hits >= 2 and not stop_reason:
                         if gpu_hotspot is not None and gpu_hotspot_limit is not None and gpu_hotspot >= gpu_hotspot_limit:
                             stop_reason = f'Seguridad térmica: GPU hotspot alcanzó su límite reportado ({gpu_hotspot:.1f}/{gpu_hotspot_limit:.1f} °C)'
                         elif gpu_temp is not None and gpu_temp_limit is not None:
                             stop_reason = f'Seguridad térmica: GPU alcanzó su límite reportado ({gpu_temp:.1f}/{gpu_temp_limit:.1f} °C)'
+                        elif gpu_temp is not None:
+                            stop_reason = f'Seguridad térmica: GPU alcanzó {gpu_temp:.1f} °C sin límite del proveedor disponible'
 
             if frame_end >= next_progress:
                 next_progress = frame_end + 0.30
@@ -1708,6 +1799,7 @@ void main() {
         _safe_progress(progress_callback, 1.0, 'Benchmark por áreas finalizado', final_detail)
         return {
             'kind': 'HARDWARE_VISUAL_MULTI_PHASE',
+            'benchmark_method': 'COREPULSE_GPU_VISUAL_MULTIPHASE_V2',
             'value': fps,
             'unit': 'FPS',
             'provider': 'CorePulse Visual Hardware Benchmark · Multi-phase',
@@ -1748,7 +1840,11 @@ void main() {
             'triangles_per_frame': triangles_per_frame,
             'triangles_per_s': triangles_per_s,
             'texture_allocation_requested_mb': texture_requested_mb,
-            'telemetry': _telemetry_summary([row for row in samples if row.get('phase') != 'warmup']),
+            'telemetry': {
+                **_telemetry_summary([row for row in samples if row.get('phase') != 'warmup']),
+                'gpu_sensor_match': any(bool(row.get('gpu_sensor_match')) for row in samples if row.get('phase') != 'warmup'),
+                'gpu_sensor_name': next((row.get('gpu_sensor_name') for row in samples if row.get('gpu_sensor_name')), None),
+            },
         }
     finally:
         try:
@@ -1822,6 +1918,7 @@ def run_visual_benchmark(
     components=None,
     progress_callback: ProgressCallback = None,
     telemetry_sampler: TelemetrySampler = None,
+    cancel_check: CancelCheck = None,
 ) -> Dict[str, Any]:
     """Ejecuta el benchmark visual 3D visible.
 
@@ -1837,7 +1934,7 @@ def run_visual_benchmark(
             'profile': profile_data['key'], 'profile_label': profile_data['label'],
         }
     try:
-        return _run_windows_visual(profile_data, progress_callback, telemetry_sampler, components=components)
+        return _run_windows_visual(profile_data, progress_callback, telemetry_sampler, components=components, cancel_check=cancel_check)
     except Exception as exc:
         return {
             'kind': 'HARDWARE_VISUAL', 'value': None, 'unit': 'FPS', 'provider': 'CorePulse Visual Hardware Benchmark',

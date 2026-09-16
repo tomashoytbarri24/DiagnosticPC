@@ -544,7 +544,7 @@ def build_component_evidence(result: Dict[str, Any], key: str) -> Dict[str, Any]
             ('Duración', _fmt_metric(item.get('duration_s'), 1, ' s')),
             ('Uso máximo RAM', _fmt_metric(_metric(item.get('telemetry') or {}, 'ram_usage'), 1, '%')),
             ('Proveedor', str(item.get('provider') or 'N/A')),
-        ], note=str(item.get('reason') or 'Uso de memoria observado durante el benchmark de transferencia.')))
+        ], note=str(item.get('reason') or 'Uso de memoria observado durante el benchmark de copia sostenida.')))
         value = _num(bench.get('value'))
         unit = str(bench.get('unit') or '').strip()
         if value is not None and unit.casefold() in {'mb/s', 'mib/s'}:
@@ -553,7 +553,7 @@ def build_component_evidence(result: Dict[str, Any], key: str) -> Dict[str, Any]
             bench_value = f"{_fmt_metric(value, 2)} {unit}".strip()
         sections.append(_section('Benchmark', [
             ('Estado', str(bench.get('status') or 'N/A').upper()),
-            ('Transferencia', bench_value),
+            ('Tasa de copia sostenida', bench_value),
             ('Duración', _fmt_metric(bench.get('duration_s'), 1, ' s')),
             ('Proveedor', str(bench.get('provider') or 'N/A')),
         ]))
@@ -594,8 +594,10 @@ def build_component_evidence(result: Dict[str, Any], key: str) -> Dict[str, Any]
             ('Lectura secuencial', _fmt_metric(bench.get('read_mbps'), 0, ' MB/s')),
             ('Escritura secuencial', _fmt_metric(bench.get('write_mbps'), 0, ' MB/s')),
             ('Archivo de prueba', _fmt_metric(bench.get('size_mb'), 0, ' MB')),
+            ('Modo E/S', str(bench.get('io_mode') or 'N/A')),
+            ('Resistente a caché', 'Sí' if bench.get('cache_resistant') is True else 'No / fallback' if bench.get('cache_resistant') is False else 'N/A'),
             ('Duración', _fmt_metric(bench.get('duration_s'), 1, ' s')),
-        ], note='El benchmark mide E/S real con archivo temporal; no determina por sí solo la salud física.'))
+        ], note='El benchmark mide únicamente el volumen indicado. V162 intenta I/O directo en Windows; si el controlador no lo admite, el fallback queda marcado como potencialmente cacheable. No determina por sí solo la salud física.'))
 
         tele = bench.get('telemetry') or {}
         sections.append(_section('Telemetría durante benchmark', [

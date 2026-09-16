@@ -106,13 +106,13 @@ def benchmark_card_data(key, result):
         if rounds is not None:
             detail += f' · {rounds} rondas'
         return {
-            'title': 'RAM', 'subtitle': 'Ancho de banda de memoria sostenido',
+            'title': 'RAM', 'subtitle': 'Tasa de copia sostenida de memoria',
             'status': 'Prueba completada' if available else 'No disponible',
             'short_status': 'Medida' if available else 'N/A',
             'tone': 'green' if available else 'muted', 'headline': headline,
             'secondary': transferred_text,
-            'verdict': 'Ancho de banda sostenido medido' if available else 'No hay una medición disponible',
-            'meaning': 'Mide cuánto volumen de memoria pudo copiar CorePulse por segundo durante varios segundos continuos.',
+            'verdict': 'Tasa de copia sostenida medida' if available else 'No hay una medición disponible',
+            'meaning': 'Mide cuánto volumen de memoria pudo copiar el proceso de CorePulse por segundo durante varios segundos. No equivale al ancho de banda máximo teórico de la RAM.',
             'technical_detail': f'{detail} · Duración {duration_text}',
             'explanation': explanation,
             'interpretation': interpretation,
@@ -128,8 +128,11 @@ def benchmark_card_data(key, result):
         display_headline = f'Lectura {human_number(read_mbps, 0)} MB/s' if read_mbps is not None else 'Lectura N/A'
         display_secondary = f'Escritura {human_number(write_mbps, 0)} MB/s' if write_mbps is not None else 'Escritura N/A'
         sample_text = f'archivo temporal de {human_number(size_mb, 0)} MB' if size_mb is not None else 'archivo temporal local'
-        explanation = 'CorePulse crea, lee y elimina un archivo temporal para medir E/S secuencial real.'
-        interpretation = 'El resultado corresponde a la unidad donde Windows aloja la carpeta temporal usada por la prueba.'
+        cache_resistant = r.get('cache_resistant') is True
+        io_mode = str(r.get('io_mode') or 'N/A')
+        explanation = ('CorePulse usa E/S secuencial directa de Windows con NO_BUFFERING/WRITE_THROUGH para reducir la influencia de caché.'
+                       if cache_resistant else 'CorePulse crea, lee y elimina un archivo temporal para medir E/S secuencial real; esta ejecución usó un fallback potencialmente cacheable.')
+        interpretation = 'El resultado corresponde únicamente al volumen probado y no representa automáticamente otras unidades del equipo.'
         return {
             'title': 'SSD', 'subtitle': 'Velocidad de almacenamiento',
             'status': 'Prueba completada' if available else 'No disponible',
@@ -137,8 +140,8 @@ def benchmark_card_data(key, result):
             'tone': 'cyan' if available else 'muted', 'headline': headline,
             'secondary': write_text, 'display_headline': display_headline, 'display_secondary': display_secondary,
             'verdict': 'Lectura y escritura medidas' if available else 'No hay una medición disponible',
-            'meaning': 'Mide transferencias secuenciales del disco usado por la carpeta temporal de Windows. Más alto significa más velocidad en esta prueba.',
-            'technical_detail': f'{sample_text} · Duración {duration_text}',
+            'meaning': ('Mide transferencias secuenciales del volumen probado intentando evitar la caché del sistema.' if cache_resistant else 'Mide transferencias secuenciales reales del volumen probado, pero Windows puede haber usado caché en esta ejecución.'),
+            'technical_detail': f'{sample_text} · {io_mode} · Duración {duration_text}',
             'explanation': explanation,
             'interpretation': interpretation,
         }
@@ -170,22 +173,35 @@ def benchmark_card_data(key, result):
                 'explanation': 'El resto del benchmark sigue siendo válido aunque la carga OpenGL falle.',
                 'interpretation': 'Reintentar puede ayudar; CorePulse no sustituye el dato por una estimación.',
             }
+        unit = str(r.get('unit') or '').strip()
+        low = _num(r.get('fps_1pct_low') if r.get('fps_1pct_low') is not None else r.get('one_percent_low_fps'))
+        if unit.upper() == 'FPS' or r.get('benchmark_method') == 'COREPULSE_GPU_VISUAL_MULTIPHASE_V2':
+            headline = f'{human_number(value, 1)} FPS' if value is not None else 'Carga gráfica completada'
+            secondary_parts = []
+            if low is not None:
+                secondary_parts.append(f'1% Low {human_number(low, 1)} FPS')
+            if renderer:
+                secondary_parts.append(renderer)
+            secondary = ' · '.join(secondary_parts) or f'Duración: {duration_text}'
+            return {
+                'title': 'GPU', 'subtitle': 'Benchmark visual multifase', 'status': 'Prueba 3D completada', 'short_status': 'Medida', 'tone': 'purple',
+                'headline': headline, 'secondary': secondary, 'display_headline': headline, 'display_secondary': secondary,
+                'verdict': 'Carga gráfica multifase completada',
+                'meaning': 'CorePulse mide el mismo workload visual multifase usado por Diagnóstico: geometría, fill, texturas, shaders/compute cuando están disponibles y carga combinada.',
+                'technical_detail': f'OpenGL · {renderer or "renderer N/A"} · Duración {duration_text}',
+                'explanation': 'La prueba genera trabajo gráfico local real y registra FPS/frametime del renderer que atendió el contexto.',
+                'interpretation': 'Úsala para comparar sesiones con la misma metodología; no equivale a 3DMark ni predice FPS de un juego concreto.',
+            }
         headline = f'{human_number(value, 1)} M triángulos/s' if value is not None else 'Carga gráfica completada'
-        secondary_parts = []
-        if fps is not None:
-            secondary_parts.append(f'{human_number(fps, 1)} ciclos/s')
-        if renderer:
-            secondary_parts.append(renderer)
-        secondary = ' · '.join(secondary_parts) or f'Duración: {duration_text}'
+        secondary = renderer or f'Duración: {duration_text}'
         return {
-            'title': 'GPU', 'subtitle': 'Carga gráfica OpenGL', 'status': 'Prueba 3D completada', 'short_status': 'Medida', 'tone': 'purple',
-            'headline': headline, 'secondary': secondary,
-            'display_headline': headline, 'display_secondary': secondary,
+            'title': 'GPU', 'subtitle': 'Carga gráfica OpenGL heredada', 'status': 'Prueba 3D completada', 'short_status': 'Medida', 'tone': 'purple',
+            'headline': headline, 'secondary': secondary, 'display_headline': headline, 'display_secondary': secondary,
             'verdict': 'Carga gráfica real completada',
-            'meaning': 'CorePulse renderiza geometría real en un contexto OpenGL acelerado y mide el trabajo sostenido. El nombre del renderer indica qué GPU atendió la prueba.',
+            'meaning': 'Resultado de una metodología anterior conservado para visualizar historial; no debe compararse con Benchmark 2.0.',
             'technical_detail': f'OpenGL · {renderer or "renderer N/A"} · Duración {duration_text}',
-            'explanation': 'La prueba genera trabajo gráfico local real; no usa el antiguo valor predeterminado de WinSAT D3D.',
-            'interpretation': 'Úsala para comparar este mismo PC entre ejecuciones; no equivale a 3DMark ni predice FPS de un juego concreto.',
+            'explanation': 'Carga OpenGL real de una metodología anterior.',
+            'interpretation': 'No comparar matemáticamente con sesiones Benchmark 2.0.',
         }
 
     return {
@@ -219,21 +235,7 @@ def benchmark_delta_data(key, delta_row):
         verb = 'Subió' if delta > 0 else 'Bajó'
         change = f'{verb} {human_number(abs(delta), digits)} {unit}.'.replace('  ', ' '); tone = 'cyan'
 
-    # Avisos descriptivos conservadores; no son un diagnóstico térmico universal.
-    if key == 'cpu_temp' and after >= 90:
-        change += ' Lectura muy alta al finalizar la prueba.'; tone = 'red'
-    elif key == 'cpu_temp' and after >= 80:
-        change += ' Lectura alta al finalizar la prueba.'; tone = 'amber'
-    elif key == 'gpu_temp' and after >= 90:
-        change += ' Lectura muy alta al finalizar la prueba.'; tone = 'red'
-    elif key == 'gpu_temp' and after >= 80:
-        change += ' Lectura alta al finalizar la prueba.'; tone = 'amber'
-    elif key == 'ram_usage' and after >= 95:
-        change += ' La memoria quedó casi llena.'; tone = 'red'
-    elif key == 'ram_usage' and after >= 85:
-        change += ' El uso de memoria quedó elevado.'; tone = 'amber'
-    elif key == 'cpu_ghz' and delta is not None and delta <= -0.20:
-        change += ' La frecuencia terminó claramente más baja.'; tone = 'amber'
+    # V162: Benchmark mide y describe; la interpretación térmica vive en Diagnóstico.
     return {'label': label, 'value': value, 'change': change, 'tone': tone}
 
 
@@ -252,29 +254,12 @@ def benchmark_component_conclusion(key, suite, compare=None):
 
     deltas = compare.get('deltas') if compare.get('available') and isinstance(compare.get('deltas'), dict) else {}
     if key == 'cpu':
-        temp = deltas.get('cpu_temp') if isinstance(deltas.get('cpu_temp'), dict) else {}
-        clock = deltas.get('cpu_ghz') if isinstance(deltas.get('cpu_ghz'), dict) else {}
-        after_temp = _num(temp.get('after')); clock_delta = _num(clock.get('delta'))
-        if after_temp is not None and after_temp >= 90:
-            return 'Atención: el CPU terminó con una temperatura muy alta.', 'red'
-        if clock_delta is not None and clock_delta <= -0.20:
-            return 'Atención: la frecuencia del CPU terminó claramente más baja.', 'amber'
-        if after_temp is not None and after_temp >= 80:
-            return 'El CPU terminó caliente; revisa la sección de cambios de temperatura.', 'amber'
         if deltas:
-            return 'Las lecturas finales no muestran una alerta clara de temperatura o frecuencia.', 'green'
-        return 'Resultado listo para comparar con futuras ejecuciones en este mismo PC.', 'cyan'
+            return 'Rendimiento y cambios de telemetría medidos; Diagnóstico interpreta temperatura, frecuencia y throttling.', 'cyan'
+        return 'Resultado listo para comparar con futuras ejecuciones equivalentes en este mismo PC.', 'cyan'
 
     if key == 'ram':
-        row = deltas.get('ram_usage') if isinstance(deltas.get('ram_usage'), dict) else {}
-        after = _num(row.get('after'))
-        if after is not None and after >= 95:
-            return 'Atención: la memoria quedó casi llena al terminar.', 'red'
-        if after is not None and after >= 85:
-            return 'La memoria terminó con un uso elevado.', 'amber'
-        if after is not None:
-            return 'La prueba de memoria terminó sin una alerta clara de uso.', 'green'
-        return 'Velocidad de copia lista para comparar con futuras ejecuciones.', 'cyan'
+        return 'Tasa de copia sostenida medida; Diagnóstico interpreta presión de memoria usando el contexto completo.', 'cyan'
 
     if key == 'ssd':
         return 'Lectura y escritura secuencial completadas correctamente.', 'cyan'

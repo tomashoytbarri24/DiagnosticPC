@@ -307,3 +307,18 @@ Pulido de legibilidad, semántica precisa de controladores, diferenciación de A
 - Pantalla y PDF reutilizan el mismo resumen determinista REAL_OR_NA.
 - Sin cambios en runtime protegido, SMART/NVMe, publicación Git ni optimización de resize.
 
+
+## V161 — DIAGNOSTIC_BENCHMARK_LOAD_TELEMETRY
+- Diagnóstico Completo elimina el stress automático y usa benchmark CPU/RAM/SSD/GPU como única fuente de carga normal.
+- La telemetría se recoge durante el benchmark y se conserva separada del rendimiento medido.
+- Cancelación/reinicio, seguridad térmica, PDF e historial permanecen bajo REAL_OR_NA.
+- El publicador Git reconoce la carpeta real ejecutada y preserva FASE 1/2/3 y cambios ajenos.
+
+## V162 — BENCHMARK_2_0_METHOD_CONSISTENCY
+- Benchmark y Diagnóstico reutilizan la misma metodología GPU visual multifase; la carga OpenGL simple queda sólo como motor interno/compatibilidad.
+- La identidad GPU normaliza únicamente sufijos técnicos conocidos del renderer y exige coincidencia única antes de atribuir sensores.
+- SSD intenta I/O directo de Windows (`NO_BUFFERING` + `WRITE_THROUGH`) para reducir influencia de caché; cualquier fallback queda marcado como potencialmente cacheable.
+- RAM se presenta como tasa de copia sostenida del proceso CorePulse, no como ancho de banda DDR teórico.
+- Benchmark mide; Diagnóstico interpreta. Se eliminan conclusiones térmicas genéricas del resumen de benchmark.
+- La metodología queda versionada (`COREPULSE_BENCHMARK_2`) y el historial sólo calcula variaciones entre sesiones equivalentes; SSD exige mismo volumen/modo de E/S.
+- Se conserva el Diagnóstico sin stress automático y el publicador Git corregido de V161.

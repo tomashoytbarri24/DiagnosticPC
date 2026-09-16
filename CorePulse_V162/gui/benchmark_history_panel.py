@@ -93,12 +93,20 @@ def _suite(session):
 
 def _visual(session):
     suite = _suite(session)
-    return suite.get("visual_gpu") if isinstance(suite.get("visual_gpu"), dict) else {}
+    if isinstance(suite.get("visual_gpu"), dict):
+        return suite.get("visual_gpu")
+    # Diagnóstico V162 persiste directamente run_benchmark_suite.
+    gpu = suite.get("gpu") if isinstance(suite.get("gpu"), dict) else {}
+    return gpu if gpu.get("benchmark_method") == "COREPULSE_GPU_VISUAL_MULTIPHASE_V2" else {}
 
 
 def _system_suite(session):
     suite = _suite(session)
-    return suite.get("system_suite") if isinstance(suite.get("system_suite"), dict) else {}
+    if isinstance(suite.get("system_suite"), dict):
+        return suite.get("system_suite")
+    if any(isinstance(suite.get(key), dict) for key in ("cpu", "ram", "ssd")):
+        return suite
+    return {}
 
 
 def _renderer(session):
@@ -119,7 +127,7 @@ def _metric(session, key):
     if key == "gpu_fps":
         return _num(visual.get("frames_per_s"))
     if key == "gpu_low":
-        return _num(visual.get("one_percent_low_fps"))
+        return _num(visual.get("one_percent_low_fps") if visual.get("one_percent_low_fps") is not None else visual.get("fps_1pct_low"))
     if key == "cpu":
         row = system.get("cpu") if isinstance(system.get("cpu"), dict) else {}
         value = _num(row.get("throughput_mbps"))
@@ -160,27 +168,33 @@ def _metric_text(session):
 
 
 def _signature(session):
-    profile = str(session.get("profile") or _suite(session).get("profile") or "").strip().upper()
+    suite = _suite(session)
+    profile = str(session.get("profile") or suite.get("profile") or "").strip().upper()
     comps = tuple(sorted(_components(session)))
     hardware = session.get("hardware") if isinstance(session.get("hardware"), dict) else {}
     cpu = str(hardware.get("cpu_name") or "").strip().lower()
     gpu = str(hardware.get("gpu_name") or "").strip().lower()
     renderer = _renderer(session).strip().lower()
-    return profile, comps, cpu, gpu, renderer if renderer != "n/a" else ""
+    method = str(suite.get("benchmark_method") or "LEGACY_UNVERSIONED").strip().upper()
+    system = _system_suite(session)
+    ssd = system.get("ssd") if isinstance(system.get("ssd"), dict) else {}
+    ssd_volume = str(ssd.get("path_root") or "").strip().casefold()
+    ssd_mode = str(ssd.get("io_mode") or "LEGACY").strip().upper()
+    return profile, comps, cpu, gpu, renderer if renderer != "n/a" else "", method, ssd_volume, ssd_mode
 
 
 def _equivalent(a, b):
-    pa, ca, cpua, gpua, ra = _signature(a)
-    pb, cb, cpub, gpub, rb = _signature(b)
-    if pa != pb or ca != cb:
+    pa, ca, cpua, gpua, ra, ma, va, ia = _signature(a)
+    pb, cb, cpub, gpub, rb, mb, vb, ib = _signature(b)
+    if pa != pb or ca != cb or ma != mb:
         return False
     if cpua and cpub and cpua != cpub:
         return False
     if gpua and gpub and gpua != gpub:
         return False
-    # Renderer sólo restringe cuando ambos fueron registrados. Esto conserva
-    # compatibilidad con sesiones V114-V136 donde el renderer no estaba en hardware_json.
     if ra and rb and ra != rb:
+        return False
+    if 'SSD' in ca and (va != vb or ia != ib):
         return False
     return True
 
