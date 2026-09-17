@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import ast
 import json
 import os
 from pathlib import Path
@@ -30,11 +31,27 @@ import tempfile
 import time
 from typing import Callable, Iterable
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
+from urllib.request import Request, build_opener, HTTPRedirectHandler
+import stat
 import zipfile
 
 from core.runtime_paths import config_path, data_path, executable_root, is_frozen, source_root
 from core.version import VERSION, VERSION_LABEL
+
+class _SafeRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urlsplit(newurl).scheme != 'https':
+            raise UpdateError('La descarga intentó redirigir a una conexión no segura.')
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None and urlsplit(newurl).hostname != 'api.github.com':
+            redirected.remove_header('Authorization')
+        return redirected
+
+
+def urlopen(request, timeout=30):
+    return build_opener(_SafeRedirect()).open(request, timeout=timeout)
+
 
 DEFAULT_OWNER = "tomashoytbarri24"
 DEFAULT_REPO = "DiagnosticPC"
@@ -97,7 +114,7 @@ def _repo_parts() -> tuple[str, str]:
 
 def releases_api_url() -> str:
     owner, repo = _repo_parts()
-    return f"https://api.github.com/repos/{owner}/{repo}/releases?per_page=30"
+    return f"https://api.github.com/repos/{owner}/{repo}/releases?per_page=100"
 
 
 def releases_web_url() -> str:
@@ -130,18 +147,23 @@ def _request(url: str, *, accept: str = "application/vnd.github+json") -> Reques
         "X-GitHub-Api-Version": API_VERSION,
     }
     token = str(os.environ.get("COREPULSE_GITHUB_TOKEN") or "").strip()
-    if token:
+    if token and urlsplit(url).hostname == "api.github.com":
         headers["Authorization"] = f"Bearer {token}"
+    if urlsplit(url).scheme != "https":
+        raise UpdateError("Actualizaciones requiere una conexión HTTPS.")
     return Request(url, headers=headers)
 
 
 def _friendly_network_error(exc: Exception) -> UpdateError:
+    if isinstance(exc, UpdateError):
+        return exc
     if isinstance(exc, HTTPError):
-        if exc.code in {401, 403, 404}:
-            return UpdateError(
-                "GitHub no permitió consultar las releases. Si el repositorio es privado, "
-                "define COREPULSE_GITHUB_TOKEN en el entorno de pruebas."
-            )
+        if exc.code == 404:
+            return UpdateError("Repositorio de actualizaciones no encontrado o privado sin acceso autorizado.")
+        if exc.code == 401:
+            return UpdateError("La credencial de GitHub no es válida o ha caducado.")
+        if exc.code in {403, 429}:
+            return UpdateError("GitHub limitó las consultas o denegó el acceso. Reintenta más tarde y comprueba los permisos si el repositorio es privado.")
         return UpdateError(f"GitHub respondió HTTP {exc.code}.")
     if isinstance(exc, URLError):
         return UpdateError("No se pudo conectar con GitHub. Comprueba Internet y vuelve a intentar.")
@@ -149,17 +171,28 @@ def _friendly_network_error(exc: Exception) -> UpdateError:
 
 
 def fetch_releases(*, timeout: float = 8.0, opener=urlopen) -> list[ReleaseInfo]:
-    try:
-        with opener(_request(releases_api_url()), timeout=timeout) as response:
-            raw = response.read()
-    except Exception as exc:
-        raise _friendly_network_error(exc) from exc
-    try:
-        payload = json.loads(raw.decode("utf-8"))
-    except Exception as exc:
-        raise UpdateError("GitHub devolvió una respuesta de releases que CorePulse no pudo interpretar.") from exc
-    if not isinstance(payload, list):
-        raise UpdateError("La respuesta de GitHub no contiene una lista de releases.")
+    payload = []
+    for page in range(1, 11):
+        url = releases_api_url() + f'&page={page}'
+        try:
+            with opener(_request(url), timeout=timeout) as response:
+                raw = response.read(8 * 1024 * 1024 + 1)
+                next_page = 'rel="next"' in str(response.headers.get('Link') or '')
+            if len(raw) > 8 * 1024 * 1024:
+                raise UpdateError('La respuesta de GitHub excede el tamaño admitido.')
+        except Exception as exc:
+            raise _friendly_network_error(exc) from exc
+        try:
+            items = json.loads(raw.decode('utf-8'))
+        except Exception as exc:
+            raise UpdateError('GitHub devolvió una respuesta de releases no válida.') from exc
+        if not isinstance(items, list):
+            raise UpdateError('La respuesta de GitHub no contiene una lista de releases.')
+        payload.extend(items)
+        if not next_page:
+            break
+    else:
+        raise UpdateError('No se pudo completar la consulta de todas las páginas de Releases.')
 
     releases: list[ReleaseInfo] = []
     for item in payload:
@@ -194,8 +227,8 @@ def fetch_releases(*, timeout: float = 8.0, opener=urlopen) -> list[ReleaseInfo]
     return releases
 
 
-def choose_release(releases: Iterable[ReleaseInfo], channel: str = CHANNEL_INTERNAL) -> ReleaseInfo | None:
-    channel = channel if channel in VALID_CHANNELS else CHANNEL_INTERNAL
+def choose_release(releases: Iterable[ReleaseInfo], channel: str = CHANNEL_STABLE) -> ReleaseInfo | None:
+    channel = channel if channel in VALID_CHANNELS else CHANNEL_STABLE
     candidates = []
     for release in releases:
         if channel == CHANNEL_STABLE and release.prerelease:
@@ -208,13 +241,13 @@ def choose_release(releases: Iterable[ReleaseInfo], channel: str = CHANNEL_INTER
     return max(candidates, key=lambda r: r.version_key)
 
 
-def check_for_update(channel: str = CHANNEL_INTERNAL, *, timeout: float = 8.0, opener=urlopen) -> dict:
+def check_for_update(channel: str = CHANNEL_STABLE, *, timeout: float = 8.0, opener=urlopen) -> dict:
     releases = fetch_releases(timeout=timeout, opener=opener)
     latest = choose_release(releases, channel)
     current_key = parse_version_key(VERSION)
     latest_key = latest.version_key if latest else tuple()
     return {
-        "channel": channel if channel in VALID_CHANNELS else CHANNEL_INTERNAL,
+        "channel": channel if channel in VALID_CHANNELS else CHANNEL_STABLE,
         "current_version": VERSION,
         "current_label": VERSION_LABEL,
         "latest": latest,
@@ -227,7 +260,14 @@ def check_for_update(channel: str = CHANNEL_INTERNAL, *, timeout: float = 8.0, o
 
 def choose_asset(release: ReleaseInfo, *, frozen: bool | None = None) -> ReleaseAsset | None:
     frozen = is_frozen() if frozen is None else bool(frozen)
-    assets = list(release.assets)
+    def compatible(asset):
+        name = asset.name.casefold()
+        if not name.startswith('corepulse'):
+            return False
+        if frozen:
+            return name.endswith('.msi') or (name.endswith('.exe') and ('setup' in name or 'installer' in name))
+        return name.endswith('.zip')
+    assets = [asset for asset in release.assets if compatible(asset)]
     if not assets:
         return None
 
@@ -283,6 +323,32 @@ def sha256_file(path: Path, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
+def _download_target(asset, release):
+    name = str(asset.name)
+    if (not name or name in {'.', '..'} or name != Path(name).name
+            or any(c in name for c in '/\\:') or name.rstrip(' .') != name):
+        raise UpdateError('El paquete tiene un nombre de archivo no válido.')
+    tag = str(release.tag or release.name or 'release')
+    folder = re.sub(r'[^A-Za-z0-9._-]+', '_', tag).strip(' .')[:80] or 'release'
+    # Evita que dos tags distintos saneados al mismo texto compartan descarga.
+    folder += '-' + hashlib.sha256(tag.encode()).hexdigest()[:10]
+    root = updates_dir().resolve()
+    target = (root / folder / name).resolve()
+    if not target.is_relative_to(root):
+        raise UpdateError('La descarga sale de su carpeta autorizada.')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _verify_download(download):
+    path = Path(str(download.get('path') or ''))
+    expected = str(download.get('expected_sha256') or '')
+    if (not download.get('verified') or not re.fullmatch(r'[0-9a-fA-F]{64}', expected)
+            or not path.is_file() or sha256_file(path).lower() != expected.lower()):
+        raise UpdateError('El paquete cambió o no está verificado. Descarga la actualización otra vez.')
+    return path
+
+
 def download_asset(
     asset: ReleaseAsset,
     release: ReleaseInfo,
@@ -291,63 +357,28 @@ def download_asset(
     timeout: float = 30.0,
     opener=urlopen,
 ) -> dict:
-    target_dir = updates_dir() / (release.tag or release.name or "release")
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / Path(asset.name).name
-    part = target.with_suffix(target.suffix + ".part")
-    part.unlink(missing_ok=True)
-
-    try:
-        request = _request(
-            _download_url(asset),
-            accept="application/octet-stream" if asset.api_url and _download_url(asset) == asset.api_url else "*/*",
-        )
-        with opener(request, timeout=timeout) as response, part.open("wb") as handle:
-            total = int(response.headers.get("Content-Length") or asset.size or 0)
-            downloaded = 0
-            while True:
-                chunk = response.read(256 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-                downloaded += len(chunk)
-                if progress:
-                    progress(downloaded, total)
-        os.replace(part, target)
-    except Exception as exc:
-        part.unlink(missing_ok=True)
-        raise _friendly_network_error(exc) from exc
-
-    actual = sha256_file(target)
-    expected = asset.sha256
-    verified = bool(expected and actual.casefold() == expected.casefold())
-    if expected and not verified:
-        target.unlink(missing_ok=True)
-        raise UpdateError("La descarga no superó la verificación SHA-256 y fue eliminada.")
-
-    metadata = {
-        "version": release.tag,
-        "release_name": release.name,
-        "asset": asset.name,
-        "path": str(target),
-        "sha256": actual,
-        "expected_sha256": expected,
-        "verified": verified,
-        "downloaded_at": time.time(),
-        "source": release.html_url,
-    }
-    try:
-        (target_dir / "download.json").write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
-    except Exception:
-        pass
-    return metadata
+    """Compatibilidad pública: todos los consumidores exigen integridad."""
+    return download_asset_verified(asset, release, progress=progress, timeout=timeout, opener=opener)
 
 
 def _safe_extract_zip(source: Path, destination: Path) -> Path:
     destination.mkdir(parents=True, exist_ok=True)
     root = destination.resolve()
     with zipfile.ZipFile(source, "r") as archive:
-        for member in archive.infolist():
+        members = archive.infolist()
+        if len(members) > 50000 or sum(m.file_size for m in members) > 8 * 1024**3:
+            raise UpdateError('El ZIP excede los límites de extracción.')
+        seen = set()
+        for member in members:
+            name = member.filename.replace('\\', '/')
+            parts = name.rstrip('/').split('/')
+            if (name.startswith('/') or any(p in {'', '.', '..'} or ':' in p or p.rstrip(' .') != p for p in parts)
+                    or stat.S_ISLNK(member.external_attr >> 16)):
+                raise UpdateError('El ZIP contiene rutas ambiguas o enlaces no admitidos.')
+            key = name.rstrip('/').casefold()
+            if key in seen:
+                raise UpdateError('El ZIP contiene rutas duplicadas.')
+            seen.add(key)
             member_path = (destination / member.filename).resolve()
             try:
                 member_path.relative_to(root)
@@ -357,24 +388,30 @@ def _safe_extract_zip(source: Path, destination: Path) -> Path:
     return destination
 
 
+def _stage_directory(kind, version):
+    label = re.sub(r'[^A-Za-z0-9_-]+', '_', str(version or 'release')).strip('_') or 'release'
+    root = updates_dir().resolve()
+    destination = root / kind / label
+    if destination.is_symlink() or destination.is_junction() or not destination.resolve().is_relative_to(root):
+        raise UpdateError('La carpeta de preparación no es segura.')
+    if destination.exists():
+        shutil.rmtree(destination)
+    return destination
+
+
 def stage_source_release(download: dict) -> dict:
     """Prepara una copia aislada para probar una release desde modo fuente."""
     if not download.get("verified"):
         raise UpdateError("La copia de prueba sólo se prepara después de verificar SHA-256.")
-    source = Path(str(download.get("path") or ""))
+    source = _verify_download(download)
     if source.suffix.casefold() != ".zip" or not source.is_file():
         raise UpdateError("La release de modo fuente necesita un asset ZIP.")
-    version = str(download.get("version") or "release").replace("/", "_").replace("\\", "_")
-    destination = updates_dir() / "staged" / version
-    if destination.exists():
-        shutil.rmtree(destination, ignore_errors=True)
+    destination = _stage_directory('staged', download.get('version'))
     _safe_extract_zip(source, destination)
 
-    candidates = [destination / "main.py", destination / "corepulse_launcher.py"]
-    for child in destination.iterdir() if destination.exists() else []:
-        if child.is_dir():
-            candidates.extend([child / "main.py", child / "corepulse_launcher.py"])
-    entry = next((p for p in candidates if p.is_file()), None)
+    incoming = _package_root_from_extract(destination)
+    _validate_package(incoming, download.get('version'))
+    entry = next((p for p in (incoming / 'corepulse_launcher.py', incoming / 'main.py') if p.is_file()), None)
     if entry is None:
         raise UpdateError("El ZIP se verificó, pero no contiene una entrada reconocible de CorePulse.")
     return {"directory": str(destination), "entry": str(entry), "version": download.get("version")}
@@ -394,7 +431,7 @@ def launch_staged_source(staged: dict) -> bool:
 def launch_installer(download: dict) -> bool:
     if not download.get("verified"):
         raise UpdateError("CorePulse no abrirá un instalador sin verificación SHA-256.")
-    path = Path(str(download.get("path") or ""))
+    path = _verify_download(download)
     if not path.is_file() or path.suffix.casefold() not in {".exe", ".msi"}:
         raise UpdateError("No se encontró un instalador compatible en la release.")
     if os.name == "nt":
@@ -419,7 +456,7 @@ def open_updates_folder() -> bool:
 
 
 def load_preferences() -> dict:
-    defaults = {"channel": CHANNEL_INTERNAL}
+    defaults = {"channel": CHANNEL_STABLE}
     path = config_path(PREFERENCES_FILE)
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -428,14 +465,14 @@ def load_preferences() -> dict:
     except Exception:
         pass
     if defaults.get("channel") not in VALID_CHANNELS:
-        defaults["channel"] = CHANNEL_INTERNAL
+        defaults["channel"] = CHANNEL_STABLE
     return defaults
 
 
 def save_preferences(**values) -> bool:
     payload = load_preferences()
     payload.update(values)
-    payload["channel"] = payload.get("channel") if payload.get("channel") in VALID_CHANNELS else CHANNEL_INTERNAL
+    payload["channel"] = payload.get("channel") if payload.get("channel") in VALID_CHANNELS else CHANNEL_STABLE
     try:
         path = config_path(PREFERENCES_FILE)
         path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -461,7 +498,7 @@ _MANAGED_DIRS = {
     "assets", "build", "core", "database", "gui", "installer", "performance",
     "tests", "tools",
 }
-_PRESERVED_NAMES = {".git", ".venv", "data", "logs", "__pycache__"}
+_PRESERVED_NAMES = {".git", ".venv", "venv", ".env", "data", "logs", "__pycache__"}
 
 
 def installation_mode() -> str:
@@ -498,21 +535,20 @@ def _sidecar_candidates(release: ReleaseInfo, asset: ReleaseAsset) -> list[Relea
     return out
 
 
-def _parse_checksum_text(text: str, asset_name: str) -> str | None:
-    wanted = Path(asset_name).name.casefold()
-    hashes: list[str] = []
-    for raw_line in str(text or "").splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        match = re.search(r"(?i)\b([0-9a-f]{64})\b", line)
-        if not match:
-            continue
-        value = match.group(1).lower()
-        hashes.append(value)
-        if wanted in line.casefold():
-            return value
-    return hashes[0] if len(hashes) == 1 else None
+def _parse_checksum_text(text: str, asset_name: str, *, allow_bare=False) -> str | None:
+    wanted = asset_name.casefold()
+    matches = []
+    for line in str(text or '').splitlines():
+        line = line.strip()
+        match = re.fullmatch(r'([0-9a-fA-F]{64})[ \t]+\*?(.+)', line)
+        bsd = re.fullmatch(r'SHA256 \((.+)\) = ([0-9a-fA-F]{64})', line, re.I)
+        if match and match.group(2).strip().casefold() == wanted:
+            matches.append(match.group(1).lower())
+        elif bsd and bsd.group(1).casefold() == wanted:
+            matches.append(bsd.group(2).lower())
+        elif allow_bare and re.fullmatch(r'[0-9a-fA-F]{64}', line):
+            matches.append(line.lower())
+    return matches[0] if matches and len(set(matches)) == 1 else None
 
 
 def resolve_release_sha256(
@@ -533,7 +569,8 @@ def resolve_release_sha256(
             )
             with opener(request, timeout=timeout) as response:
                 raw = response.read(256 * 1024)
-            expected = _parse_checksum_text(raw.decode("utf-8", errors="replace"), asset.name)
+            expected = _parse_checksum_text(raw.decode("utf-8", errors="replace"), asset.name,
+                allow_bare=sidecar.name.casefold() in {asset.name.casefold()+suffix for suffix in ('.sha256', '.sha256.txt', '.sha256sum')})
             if expected:
                 return expected, f"sidecar:{sidecar.name}"
         except Exception:
@@ -548,17 +585,21 @@ def download_asset_verified(
     progress: Callable[[int, int], None] | None = None,
     timeout: float = 30.0,
     opener=urlopen,
+    cancel=None,
 ) -> dict:
     """V129: descarga sólo el asset elegido y exige SHA-256 verificable."""
+    def check_cancel():
+        if cancel is not None and cancel.is_set():
+            raise UpdateError('Descarga cancelada. Puedes volver a intentarlo.')
+    check_cancel()
     expected, source = resolve_release_sha256(release, asset, timeout=min(timeout, 12.0), opener=opener)
     if not expected:
         raise UpdateError(
             "La release no publica un SHA-256 verificable para el paquete seleccionado. "
             "CorePulse no instalará una actualización sin integridad comprobada."
         )
-    target_dir = updates_dir() / (release.tag or release.name or "release")
-    target_dir.mkdir(parents=True, exist_ok=True)
-    target = target_dir / Path(asset.name).name
+    target = _download_target(asset, release)
+    target_dir = target.parent
     part = target.with_suffix(target.suffix + ".part")
     part.unlink(missing_ok=True)
     try:
@@ -570,6 +611,7 @@ def download_asset_verified(
             total = int(response.headers.get("Content-Length") or asset.size or 0)
             downloaded = 0
             while True:
+                check_cancel()
                 chunk = response.read(256 * 1024)
                 if not chunk:
                     break
@@ -577,14 +619,15 @@ def download_asset_verified(
                 downloaded += len(chunk)
                 if progress:
                     progress(downloaded, total)
+        check_cancel()
+        actual = sha256_file(part)
+        if actual.casefold() != expected.casefold():
+            raise UpdateError('La descarga no superó la verificación SHA-256 y fue eliminada.')
+        check_cancel()
         os.replace(part, target)
     except Exception as exc:
         part.unlink(missing_ok=True)
         raise _friendly_network_error(exc) from exc
-    actual = sha256_file(target)
-    if actual.casefold() != expected.casefold():
-        target.unlink(missing_ok=True)
-        raise UpdateError("La descarga no superó la verificación SHA-256 y fue eliminada.")
     metadata = {
         "version": release.tag,
         "release_name": release.name,
@@ -610,10 +653,23 @@ def _package_root_from_extract(destination: Path) -> Path:
     candidates = [child for child in destination.iterdir() if child.is_dir() and (child / "main.py").is_file()]
     if len(candidates) == 1:
         return candidates[0]
-    for child in candidates:
-        if (child / "core" / "version.py").is_file():
-            return child
     raise UpdateError("El ZIP verificado no contiene una raíz reconocible de CorePulse.")
+
+
+def _validate_package(root, expected_version=None):
+    version_file = root / 'core' / 'version.py'
+    if not (root / 'main.py').is_file() or not version_file.is_file():
+        raise UpdateError('El ZIP no contiene una aplicación CorePulse completa reconocible.')
+    try:
+        tree = ast.parse(version_file.read_text(encoding='utf-8-sig'))
+        versions = [ast.literal_eval(n.value) for n in tree.body if isinstance(n, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == 'VERSION' for t in n.targets)]
+        version = versions[0] if len(versions) == 1 else None
+    except Exception as exc:
+        raise UpdateError('No se pudo verificar la versión del paquete.') from exc
+    if not parse_version_key(version) or (expected_version and parse_version_key(version) != parse_version_key(expected_version)):
+        raise UpdateError('La versión dentro del paquete no coincide con la Release.')
+    return str(version)
 
 
 def backup_dir() -> Path:
@@ -678,15 +734,13 @@ def prepare_source_update(download: dict) -> dict:
         )
     if not download.get("verified"):
         raise UpdateError("La actualización sólo puede prepararse después de verificar SHA-256.")
-    package = Path(str(download.get("path") or ""))
+    package = _verify_download(download)
     if package.suffix.casefold() != ".zip" or not package.is_file():
         raise UpdateError("La actualización portable/fuente necesita un paquete ZIP.")
-    version = re.sub(r"[^A-Za-z0-9._-]+", "_", str(download.get("version") or "release"))
-    stage = updates_dir() / "apply" / version
-    if stage.exists():
-        shutil.rmtree(stage, ignore_errors=True)
+    stage = _stage_directory('apply', download.get('version'))
     _safe_extract_zip(package, stage)
     incoming = _package_root_from_extract(stage)
+    _validate_package(incoming, download.get('version'))
     backup = create_source_backup(label=VERSION_LABEL)
     plan = {
         "mode": "update",
@@ -694,8 +748,10 @@ def prepare_source_update(download: dict) -> dict:
         "current_root": str(source_root().resolve()),
         "incoming_root": str(incoming.resolve()),
         "backup_zip": backup["path"],
+        "backup_sha256": backup["sha256"],
+        "incoming_files": {str(p.relative_to(incoming)): sha256_file(p) for p in incoming.rglob('*') if p.is_file()},
         "python": sys.executable,
-        "relaunch": "main.py",
+        "relaunch": "corepulse_launcher.py" if (source_root() / 'corepulse_launcher.py').is_file() else "main.py",
         "status": str((updates_dir() / "last_update_status.json").resolve()),
         "target_version": str(download.get("version") or ""),
     }
@@ -707,15 +763,16 @@ def prepare_source_rollback(backup_path: str | os.PathLike | None = None) -> dic
         raise UpdateError("Rollback automático no se aplica dentro de un checkout Git.")
     backups = list_source_backups()
     selected = Path(backup_path).resolve() if backup_path else (Path(backups[0]["path"]).resolve() if backups else None)
-    if selected is None or not selected.is_file():
+    if selected is None or not selected.is_file() or selected.parent != backup_dir().resolve():
         raise UpdateError("No hay una copia de seguridad disponible para restaurar.")
     plan = {
         "mode": "rollback",
         "pid": os.getpid(),
         "current_root": str(source_root().resolve()),
         "backup_zip": str(selected),
+        "backup_sha256": sha256_file(selected),
         "python": sys.executable,
-        "relaunch": "main.py",
+        "relaunch": "corepulse_launcher.py" if (source_root() / 'corepulse_launcher.py').is_file() else "main.py",
         "status": str((updates_dir() / "last_update_status.json").resolve()),
         "target_version": "rollback",
     }
@@ -757,11 +814,19 @@ def read_last_update_status() -> dict | None:
 
 
 _UPDATE_HELPER_SCRIPT = r'''from __future__ import annotations
-import json, os, shutil, subprocess, sys, time, zipfile
+import hashlib, json, os, shutil, subprocess, sys, time, zipfile
 from pathlib import Path
 
-PRESERVE = {".git", ".venv", "data", "logs", "__pycache__"}
+PRESERVE = {".git", ".venv", "venv", ".env", "data", "logs", "__pycache__"}
 MANAGED_DIRS = {"assets", "build", "core", "database", "gui", "installer", "performance", "tests", "tools"}
+
+def digest_file(path):
+    h = hashlib.sha256()
+    with Path(path).open('rb') as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
 
 def write_status(path, **payload):
     try:
@@ -811,8 +876,12 @@ def copy_incoming(incoming, root):
             shutil.copy2(src, dst)
 
 def restore_zip(backup, root):
-    clear_managed(root)
     with zipfile.ZipFile(backup, "r") as zf:
+        for item in zf.infolist():
+            name = item.filename.replace('\\', '/')
+            if not (root / name).resolve().is_relative_to(root) or any(p in PRESERVE for p in Path(name).parts):
+                raise RuntimeError('Backup con rutas no permitidas')
+        clear_managed(root)
         zf.extractall(root)
 
 def relaunch(plan, root):
@@ -825,8 +894,33 @@ def main():
     plan = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
     root = Path(plan["current_root"]).resolve()
     status = plan["status"]
-    wait_pid(plan.get("pid", 0))
+    modified = False
     try:
+        if not (root / 'main.py').is_file() or not (root / 'core' / 'version.py').is_file():
+            raise RuntimeError('Destino de actualización no reconocido')
+        if any(p.is_symlink() or p.is_junction() for p in root.iterdir()):
+            raise RuntimeError('El destino contiene enlaces; actualización automática no admitida')
+        if any((parent / '.git').exists() for parent in [root, *list(root.parents)[:4]]):
+            raise RuntimeError('El destino pertenece a un checkout Git')
+        backup = Path(plan['backup_zip'])
+        if digest_file(backup) != plan.get('backup_sha256'):
+            raise RuntimeError('La copia de seguridad cambió o no está verificada')
+        if plan.get('mode') == 'update':
+            incoming = Path(plan['incoming_root']).resolve()
+            if incoming == root or incoming.is_relative_to(root) or root.is_relative_to(incoming):
+                raise RuntimeError('Origen y destino de actualización se solapan')
+            files = plan.get('incoming_files') or {}
+            actual_files = {str(p.relative_to(incoming)) for p in incoming.rglob('*') if p.is_file()}
+            if not files or actual_files != set(files):
+                raise RuntimeError('Cambió el contenido del paquete preparado')
+            for relative, digest in files.items():
+                path = (incoming / relative).resolve()
+                if not path.is_relative_to(incoming) or digest_file(path) != digest:
+                    raise RuntimeError('Cambió el paquete preparado')
+        elif plan.get('mode') != 'rollback':
+            raise RuntimeError('Operación de actualización no válida')
+        wait_pid(plan.get('pid', 0))
+        modified = True
         if plan.get("mode") == "rollback":
             restore_zip(Path(plan["backup_zip"]), root)
             write_status(status, ok=True, action="rollback", finished_at=time.time(), backup=plan["backup_zip"])
@@ -837,14 +931,15 @@ def main():
     except Exception as exc:
         try:
             backup = Path(plan.get("backup_zip") or "")
-            if backup.is_file(): restore_zip(backup, root)
+            if modified and backup.is_file(): restore_zip(backup, root)
         except Exception:
             pass
         write_status(status, ok=False, action=plan.get("mode"), error=f"{type(exc).__name__}: {exc}", finished_at=time.time(), backup=plan.get("backup_zip"))
-    try:
-        relaunch(plan, root)
-    except Exception:
-        pass
+    if modified:
+        try:
+            relaunch(plan, root)
+        except Exception as exc:
+            write_status(status, ok=False, action=plan.get('mode'), error='No se pudo reiniciar: ' + str(exc), finished_at=time.time())
 
 if __name__ == "__main__":
     main()

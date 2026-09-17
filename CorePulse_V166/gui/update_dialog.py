@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from datetime import datetime
 import threading
+import time
 import webbrowser
 from tkinter import filedialog
 
@@ -20,7 +21,7 @@ from core.update_manager import (
     launch_source_update_helper, launch_staged_source, list_source_backups,
     load_preferences, open_updates_folder, prepare_source_rollback,
     prepare_source_update, releases_web_url, save_preferences,
-    source_update_supported, stage_source_release,
+    source_update_supported, stage_source_release, read_last_update_status,
 )
 from core.version import VERSION_LABEL
 from core.developer_publisher import (
@@ -83,12 +84,14 @@ class UpdatePanel:
         self.busy = False
         self.mode = installation_mode()
         self._alive = True
+        self._visible = True
+        self._download_cancel = threading.Event()
         self._auto_check_started = False
         self.publish_frame = None
         self.publish_context = None
 
         prefs = load_preferences()
-        self.channel_var = ctk.StringVar(value=LABEL_BY_CHANNEL.get(prefs.get("channel"), "Desarrollo"))
+        self.channel_var = ctk.StringVar(value=LABEL_BY_CHANNEL.get(prefs.get("channel"), "Estable"))
         self.status_var = ctk.StringVar(value="Preparando comprobación de actualizaciones…")
         self.version_var = ctk.StringVar(value=f"Versión instalada  {VERSION_LABEL}")
         self.release_var = ctk.StringVar(value="Versión disponible  —")
@@ -115,7 +118,9 @@ class UpdatePanel:
         return self.frame
 
     def set_active(self, active: bool):
-        self._alive = bool(active)
+        # La página cacheada sigue viva: terminar un worker oculto debe liberar
+        # busy y conservar su resultado para cuando el usuario vuelva.
+        self._visible = bool(active)
 
     def refresh(self):
         """Refresca roles visuales y conserva resultados de la sesión."""
@@ -263,6 +268,12 @@ class UpdatePanel:
         self.publish_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
         ctk.CTkButton(actions, text="Volver al resumen", width=130, height=36, fg_color="transparent", hover_color=_c("surface_2"), text_color=_c("text_2"), command=self.close).grid(row=0, column=6, sticky="e")
 
+        previous = read_last_update_status()
+        if isinstance(previous, dict):
+            if previous.get('ok'):
+                self.backup_var.set('Última operación aplicada. Versión en ejecución: ' + VERSION_LABEL)
+            else:
+                self.backup_var.set('Última actualización no completada: ' + str(previous.get('error') or 'Revisa la copia de seguridad.'))
         self.on_viewport_settled()
 
     def on_viewport_settled(self):
@@ -302,7 +313,7 @@ class UpdatePanel:
         self.check()
 
     def _channel_changed(self, _value=None):
-        channel = CHANNEL_LABELS.get(self.channel_var.get(), CHANNEL_INTERNAL)
+        channel = CHANNEL_LABELS.get(self.channel_var.get(), CHANNEL_STABLE)
         save_preferences(channel=channel)
         self.result = self.asset = self.download = self.staged = None
         self.primary.configure(text="Descargar actualización", state="disabled", command=self.download_update)
@@ -349,10 +360,11 @@ class UpdatePanel:
             return
         self._set_busy(True)
         self.primary.configure(state="disabled")
+        self._download_cancel.clear()
         self.status_var.set("Consultando GitHub Releases…")
         self.progress_var.set(0.0)
         self.progress_text_var.set("")
-        channel = CHANNEL_LABELS.get(self.channel_var.get(), CHANNEL_INTERNAL)
+        channel = CHANNEL_LABELS.get(self.channel_var.get(), CHANNEL_STABLE)
         save_preferences(channel=channel)
 
         def worker():
@@ -366,6 +378,8 @@ class UpdatePanel:
     def _finish_check(self, result):
         self._set_busy(False)
         self.result = result
+        self.asset = self.download = self.staged = None
+        self.primary.configure(text='Descargar actualización', state='disabled', command=self.download_update)
         release = result.get("latest")
         if release is None:
             channel_name = self.channel_var.get()
@@ -397,20 +411,31 @@ class UpdatePanel:
         message = str(exc) if isinstance(exc, UpdateError) else f"{type(exc).__name__}: {exc}"
         self.status_var.set(message)
         self.progress_text_var.set("")
-        cp_error(self.app, "Actualizaciones", f"{title}.\n\n{message}")
+        self.download = self.staged = None
+        self.primary.configure(text='Reintentar descarga', command=self.download_update,
+                               state='normal' if self.asset and self.result and self.result.get('available') else 'disabled')
+        if self._visible and not self._download_cancel.is_set():
+            cp_error(self.app, "Actualizaciones", f"{title}.\n\n{message}")
 
     def download_update(self):
         if self.busy or self.asset is None or not self.result or not self.result.get("latest"):
             return
         self._set_busy(True)
         self.primary.configure(state="disabled")
+        self._download_cancel.clear()
+        self.primary.configure(text='Cancelar descarga', state='normal', command=self.cancel_download)
         self.status_var.set("Descargando únicamente el paquete de actualización…")
         self.progress_var.set(0.0)
         self.progress_text_var.set("Buscando SHA-256 publicado")
         release = self.result["latest"]
         asset = self.asset
 
+        last_progress = [0.0]
         def progress(done, total):
+            now = time.monotonic()
+            if now - last_progress[0] < .1 and (not total or done < total):
+                return
+            last_progress[0] = now
             def update():
                 if total > 0:
                     self.progress_var.set(min(1.0, done / total))
@@ -421,13 +446,21 @@ class UpdatePanel:
 
         def worker():
             try:
-                downloaded = download_asset_verified(asset, release, progress=progress)
+                downloaded = download_asset_verified(asset, release, progress=progress, cancel=self._download_cancel)
                 self._call_ui(lambda: self._finish_download(downloaded))
             except Exception as exc:
                 self._call_ui(lambda e=exc: self._fail("La descarga falló", e))
         threading.Thread(target=worker, daemon=True, name="CorePulse-UpdateDownload").start()
 
+    def cancel_download(self):
+        self._download_cancel.set()
+        self.primary.configure(state='disabled')
+        self.status_var.set('Cancelando descarga…')
+
     def _finish_download(self, downloaded):
+        if self._download_cancel.is_set():
+            self._fail('Descarga', UpdateError('Descarga cancelada. Puedes volver a intentarlo.'))
+            return
         self._set_busy(False)
         self.download = downloaded
         self.progress_var.set(1.0)
@@ -450,7 +483,9 @@ class UpdatePanel:
             return
         try:
             launch_installer(self.download)
-            cp_info(self.app, "Actualizaciones", "El instalador verificado fue abierto. CorePulse no ejecutó ningún paquete sin comprobar su SHA-256.")
+            self.status_var.set('Instalador verificado abierto. CorePulse se cerrará para permitir la actualización.')
+            self.primary.configure(state='disabled')
+            self.frame.after(350, self._close_app_for_update)
         except Exception as exc:
             self._fail("No se pudo abrir el instalador", exc)
 
