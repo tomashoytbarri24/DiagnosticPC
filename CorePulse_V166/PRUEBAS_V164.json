@@ -1,0 +1,23 @@
+{
+  "version": "V164",
+  "stage": "GIT_PUBLICATION_PROFILES_ROOT_SCOPE",
+  "tests": [
+    {
+      "command": "pytest -q tests/test_v164_publication_profiles.py",
+      "result": "5 passed"
+    },
+    {
+      "command": "pytest -q tests/test_publish_in_place.py",
+      "result": "13 passed, 2 subtests passed"
+    },
+    {
+      "command": "python -m compileall -q .",
+      "result": "OK"
+    }
+  ],
+  "notes": [
+    "La publicación V164 usa perfiles persistentes y alcance de raíz completa.",
+    "El publicador histórico V163 se conserva y sus pruebas dirigidas siguen pasando.",
+    "La autenticación GitHub real debe probarse en Windows con Git Credential Manager o SSH."
+  ]
+}

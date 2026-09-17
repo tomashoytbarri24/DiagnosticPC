@@ -1,0 +1,21 @@
+{
+  "tests": 36,
+  "passed": 35,
+  "skipped": 1,
+  "failed": 0,
+  "skip_reason": "Tcl/Tk init.tcl unavailable",
+  "real_short_loads": [
+    "CPU",
+    "RAM",
+    "SSD"
+  ],
+  "gui_and_real_gpu_validated": false,
+  "pdf_fixture_pages": 6,
+  "protected_sha256": {
+    "core/runtime_venv_path.py": "263d725dc8a50ef57d2e0dd8d8827968f58d2b67dcee6b0a276ca6dd8d562e92",
+    "bootstrap_corepulse.py": "925d4ef090b28c27ceffbbbba9362a8137f665212ac445e96a096c0ce5e17a0b",
+    "core/source_runtime_bootstrap.py": "bde37780c35ebc280b0b22ac6a71926051ae9fde48b65935b6af64b819f7ccfd",
+    "requirements-runtime-lock.txt": "36ee044c5dab3c5c8cfecbe0456923c9f406d83a93ef04d93f9fd27f1566c706",
+    "core/nvme_smart_windows.py": "fe9481d270d5b47299b97fc97d37ee56f65bd904333f634255e4a91e63958283"
+  }
+}

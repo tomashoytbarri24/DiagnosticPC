@@ -1,0 +1,13 @@
+{
+  "version": "V165",
+  "scope": "publication profiles UX and root publisher regression",
+  "result": "PASS",
+  "pytest": "18 passed, 2 subtests passed",
+  "checks": [
+    "profile editor collapsed by default",
+    "explicit create/edit profile workflow",
+    "Git repository auto-detection entry point",
+    "publication console visible and progress append preserved",
+    "root publisher regression tests"
+  ]
+}
