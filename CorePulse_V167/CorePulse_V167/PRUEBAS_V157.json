@@ -1,0 +1,287 @@
+{
+  "version": "V157",
+  "protected": [
+    {
+      "file": "core/runtime_venv_path.py",
+      "sha256_before": "263d725dc8a50ef57d2e0dd8d8827968f58d2b67dcee6b0a276ca6dd8d562e92",
+      "sha256_after": "263d725dc8a50ef57d2e0dd8d8827968f58d2b67dcee6b0a276ca6dd8d562e92",
+      "identical": true
+    },
+    {
+      "file": "bootstrap_corepulse.py",
+      "sha256_before": "925d4ef090b28c27ceffbbbba9362a8137f665212ac445e96a096c0ce5e17a0b",
+      "sha256_after": "925d4ef090b28c27ceffbbbba9362a8137f665212ac445e96a096c0ce5e17a0b",
+      "identical": true
+    },
+    {
+      "file": "core/source_runtime_bootstrap.py",
+      "sha256_before": "bde37780c35ebc280b0b22ac6a71926051ae9fde48b65935b6af64b819f7ccfd",
+      "sha256_after": "bde37780c35ebc280b0b22ac6a71926051ae9fde48b65935b6af64b819f7ccfd",
+      "identical": true
+    },
+    {
+      "file": "requirements-runtime-lock.txt",
+      "sha256_before": "36ee044c5dab3c5c8cfecbe0456923c9f406d83a93ef04d93f9fd27f1566c706",
+      "sha256_after": "36ee044c5dab3c5c8cfecbe0456923c9f406d83a93ef04d93f9fd27f1566c706",
+      "identical": true
+    },
+    {
+      "file": "core/nvme_smart_windows.py",
+      "sha256_before": "fe9481d270d5b47299b97fc97d37ee56f65bd904333f634255e4a91e63958283",
+      "sha256_after": "fe9481d270d5b47299b97fc97d37ee56f65bd904333f634255e4a91e63958283",
+      "identical": true
+    }
+  ],
+  "new_tests": {
+    "passed": 18,
+    "skipped": 1,
+    "failed": 0
+  },
+  "baseline_pytest": {
+    "passed": 85,
+    "failed": 44
+  },
+  "final_pytest": {
+    "passed": 102,
+    "failed": 45,
+    "skipped": 1
+  },
+  "baseline_failures": [
+    "tests.test_internal_updater_v118.InternalUpdaterV118Tests.test_check_release_and_asset_selection",
+    "tests.test_internal_updater_v118.InternalUpdaterV118Tests.test_source_tree_integration_markers",
+    "tests.test_internal_updater_v118.InternalUpdaterV118Tests.test_version_stage",
+    "tests.test_v130_embedded_updates_theme_cta.test_theme_button_never_falls_into_transparent_nav_style",
+    "tests.test_v130_embedded_updates_theme_cta.test_version_130",
+    "tests.test_v131_personalization_responsive_update.test_v131_contract",
+    "tests.test_v132_ctk_button_startup_fix.test_v132_version_and_personalization_contract",
+    "tests.test_v133_personalization_vertical_balance.test_v133_version_and_vertical_personalization_contract",
+    "tests.test_v134_corepulse_capability_self_diagnostics.test_health_center_exposes_corepulse_capability_module_without_sidebar_button",
+    "tests.test_v134_corepulse_capability_self_diagnostics.test_v134_version_and_stage",
+    "tests.test_v135_safe_git_publication.test_publication_replaces_only_corepulse_folder_and_pushes_branch",
+    "tests.test_v135_safe_git_publication.test_v135_version_and_publication_ui",
+    "tests.test_v136_git_repo_discovery_review.test_v136_version_and_review_feedback_contract",
+    "tests.test_v141_health_center_compact_optimization.test_v141_version_and_stage",
+    "tests.test_v142_complete_diagnostic_2_0.test_pdf_includes_complete_diagnostic_section",
+    "tests.test_v142_complete_diagnostic_2_0.test_v142_version_and_stage",
+    "tests.test_v143_actionable_diagnostic_report.test_v143_keeps_complete_diagnostic_policy",
+    "tests.test_v143_actionable_diagnostic_report.test_v143_version_stage",
+    "tests.test_v144_atomic_deep_navigation.test_complete_diagnostic_policy_stays_v144_and_no_auto_repairs",
+    "tests.test_v144_atomic_deep_navigation.test_v144_version_stage",
+    "tests.test_v145_tray_close_windowed_layout.test_version_145",
+    "tests.test_v146_complete_diagnostic_explainable_report.test_complete_policy_stays_real_or_na_no_rank_no_auto_repair",
+    "tests.test_v146_complete_diagnostic_explainable_report.test_pdf_reuses_same_interpretation",
+    "tests.test_v146_complete_diagnostic_explainable_report.test_v146_version_stage",
+    "tests.test_v147_responsive_diagnostic_scroll.test_result_has_responsive_breakpoints_and_one_column_fallback",
+    "tests.test_v147_responsive_diagnostic_scroll.test_v147_version_stage",
+    "tests.test_v148_fluid_resize_diagnostic.test_v148_version_stage",
+    "tests.test_v149_complete_diagnostic_traceable_evidence.test_complete_diagnostic_policy_stays_safe",
+    "tests.test_v149_complete_diagnostic_traceable_evidence.test_v149_version_stage",
+    "tests.test_v150_complete_diagnostic_final.test_v150_version_stage",
+    "tests.test_v151_cancel_publish_hotfix.test_modified_old_corepulse_still_blocks",
+    "tests.test_v151_cancel_publish_hotfix.test_v151_version_and_hotfix_contract",
+    "tests.test_v152_existing_target_publish_hotfix.test_different_existing_target_blocks",
+    "tests.test_v152_existing_target_publish_hotfix.test_v152_contract",
+    "tests.test_v153_untracked_target_sync_publish.test_different_untracked_target_is_publishable",
+    "tests.test_v153_untracked_target_sync_publish.test_publish_backs_up_untracked_target_and_replaces_old_version",
+    "tests.test_v153_untracked_target_sync_publish.test_staged_different_target_still_blocks",
+    "tests.test_v153_untracked_target_sync_publish.test_v153_contract",
+    "tests.test_v154_repository_branch_publication_architecture.test_context_separates_repo_remote_branch_and_publish_folder",
+    "tests.test_v154_repository_branch_publication_architecture.test_publish_syncs_corepulse_inside_checkout_and_pushes_branch",
+    "tests.test_v154_repository_branch_publication_architecture.test_v154_contract_and_ui_semantics",
+    "tests.test_v155_robust_branch_publish.test_dirty_old_corepulse_no_longer_blocks_and_is_preserved",
+    "tests.test_v155_robust_branch_publish.test_tracked_old_version_already_deleted_locally_still_publishes",
+    "tests.test_v155_robust_branch_publish.test_v155_contract_and_exact_branch_url"
+  ],
+  "final_failures": [
+    "tests.test_internal_updater_v118.InternalUpdaterV118Tests.test_check_release_and_asset_selection",
+    "tests.test_internal_updater_v118.InternalUpdaterV118Tests.test_source_tree_integration_markers",
+    "tests.test_internal_updater_v118.InternalUpdaterV118Tests.test_version_stage",
+    "tests.test_v130_embedded_updates_theme_cta.test_theme_button_never_falls_into_transparent_nav_style",
+    "tests.test_v130_embedded_updates_theme_cta.test_version_130",
+    "tests.test_v131_personalization_responsive_update.test_v131_contract",
+    "tests.test_v132_ctk_button_startup_fix.test_v132_version_and_personalization_contract",
+    "tests.test_v133_personalization_vertical_balance.test_v133_version_and_vertical_personalization_contract",
+    "tests.test_v134_corepulse_capability_self_diagnostics.test_health_center_exposes_corepulse_capability_module_without_sidebar_button",
+    "tests.test_v134_corepulse_capability_self_diagnostics.test_v134_version_and_stage",
+    "tests.test_v135_safe_git_publication.test_publication_replaces_only_corepulse_folder_and_pushes_branch",
+    "tests.test_v135_safe_git_publication.test_v135_version_and_publication_ui",
+    "tests.test_v136_git_repo_discovery_review.test_v136_version_and_review_feedback_contract",
+    "tests.test_v141_health_center_compact_optimization.test_v141_version_and_stage",
+    "tests.test_v142_complete_diagnostic_2_0.test_pdf_includes_complete_diagnostic_section",
+    "tests.test_v142_complete_diagnostic_2_0.test_v142_version_and_stage",
+    "tests.test_v143_actionable_diagnostic_report.test_v143_keeps_complete_diagnostic_policy",
+    "tests.test_v143_actionable_diagnostic_report.test_v143_version_stage",
+    "tests.test_v144_atomic_deep_navigation.test_complete_diagnostic_policy_stays_v144_and_no_auto_repairs",
+    "tests.test_v144_atomic_deep_navigation.test_v144_version_stage",
+    "tests.test_v145_tray_close_windowed_layout.test_version_145",
+    "tests.test_v146_complete_diagnostic_explainable_report.test_complete_policy_stays_real_or_na_no_rank_no_auto_repair",
+    "tests.test_v146_complete_diagnostic_explainable_report.test_pdf_reuses_same_interpretation",
+    "tests.test_v146_complete_diagnostic_explainable_report.test_v146_version_stage",
+    "tests.test_v147_responsive_diagnostic_scroll.test_result_has_responsive_breakpoints_and_one_column_fallback",
+    "tests.test_v147_responsive_diagnostic_scroll.test_v147_version_stage",
+    "tests.test_v148_fluid_resize_diagnostic.test_v148_version_stage",
+    "tests.test_v149_complete_diagnostic_traceable_evidence.test_complete_diagnostic_policy_stays_safe",
+    "tests.test_v149_complete_diagnostic_traceable_evidence.test_v149_version_stage",
+    "tests.test_v150_complete_diagnostic_final.test_v150_version_stage",
+    "tests.test_v151_cancel_publish_hotfix.test_modified_old_corepulse_still_blocks",
+    "tests.test_v151_cancel_publish_hotfix.test_v151_version_and_hotfix_contract",
+    "tests.test_v152_existing_target_publish_hotfix.test_different_existing_target_blocks",
+    "tests.test_v152_existing_target_publish_hotfix.test_v152_contract",
+    "tests.test_v153_untracked_target_sync_publish.test_different_untracked_target_is_publishable",
+    "tests.test_v153_untracked_target_sync_publish.test_publish_backs_up_untracked_target_and_replaces_old_version",
+    "tests.test_v153_untracked_target_sync_publish.test_staged_different_target_still_blocks",
+    "tests.test_v153_untracked_target_sync_publish.test_v153_contract",
+    "tests.test_v154_repository_branch_publication_architecture.test_context_separates_repo_remote_branch_and_publish_folder",
+    "tests.test_v154_repository_branch_publication_architecture.test_publish_syncs_corepulse_inside_checkout_and_pushes_branch",
+    "tests.test_v154_repository_branch_publication_architecture.test_v154_contract_and_ui_semantics",
+    "tests.test_v155_robust_branch_publish.test_dirty_old_corepulse_no_longer_blocks_and_is_preserved",
+    "tests.test_v155_robust_branch_publish.test_tracked_old_version_already_deleted_locally_still_publishes",
+    "tests.test_v155_robust_branch_publish.test_v155_contract_and_exact_branch_url",
+    "tests.test_v156_general_polish.test_version_156"
+  ],
+  "additional_failures": [
+    "tests.test_v156_general_polish.test_version_156"
+  ],
+  "scripts": [
+    {
+      "test": "test_startup.py",
+      "baseline_returncode": 0,
+      "v157_returncode": 0
+    },
+    {
+      "test": "test_project_structure.py",
+      "baseline_returncode": 0,
+      "v157_returncode": 0
+    },
+    {
+      "test": "test_integrity.py",
+      "baseline_returncode": 0,
+      "v157_returncode": 0
+    },
+    {
+      "test": "test_nvme_smart_windows.py",
+      "baseline_returncode": 0,
+      "v157_returncode": 0
+    },
+    {
+      "test": "test_v123_nvme_ioctl_transport.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_v122_storage_nvme_authority.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_v139_storage_health_multisource.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_storage_details.py",
+      "baseline_returncode": 0,
+      "v157_returncode": 0
+    },
+    {
+      "test": "test_battery_current_desktop_aware.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_windows_command_safety.py",
+      "baseline_returncode": 0,
+      "v157_returncode": 0
+    },
+    {
+      "test": "test_windows_stability_scan_accuracy.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_windows_stability_evidence_gated_recommendations.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_windows_stability_event_classification_reliability.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_complete_windows_services_table.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_complete_windows_drivers_table_v113.py",
+      "baseline_returncode": 0,
+      "v157_returncode": 0
+    },
+    {
+      "test": "test_driver_priority_universal_v113.py",
+      "baseline_returncode": 0,
+      "v157_returncode": 0
+    },
+    {
+      "test": "test_gpu_data_consistency.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_hardware_policy.py",
+      "baseline_returncode": 0,
+      "v157_returncode": 0
+    },
+    {
+      "test": "test_ui_diagnostic_consistency.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_pdf.py",
+      "baseline_returncode": 0,
+      "v157_returncode": 0
+    },
+    {
+      "test": "test_configurable_benchmark_profiles_v107.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_benchmark_preconfiguration_v113.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_v140_storage_wear_benchmark_clarity.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_v138_benchmark_focus_history_export.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_v137_benchmark_history_explorer.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_sustained_real_benchmark_v106.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_runtime_observability.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    },
+    {
+      "test": "test_cpu_sensor_inventory_reliability.py",
+      "baseline_returncode": 1,
+      "v157_returncode": 1
+    }
+  ]
+}
