@@ -3,9 +3,8 @@
 V0.10.2.53w:
 - Cada modo visible de CorePulse activa un plan REAL de Windows con powercfg /setactive.
 - Se verifica el GUID activo después de cada cambio.
-- Si un plan estándar no existe, CorePulse intenta duplicar la plantilla oficial.
-  En perfiles manuales confirmados esa copia permanece disponible en Windows; sólo
-  una transacción incompleta/fallida utiliza rollback para eliminarla.
+- Las copias propias se registran y reutilizan por GUID. El rollback restaura
+  ajustes y plan previo, conservando las copias registradas para otras sesiones.
 - Los ajustes CPU/Boost/EPP sólo se modifican cuando pudieron respaldarse en el
   plan de destino. Si el OEM no los expone, el cambio de plan sigue funcionando
   y CorePulse informa modo compatible/parcial en lugar de inventar éxito total.
@@ -48,14 +47,28 @@ COREPULSE_FALLBACK_NAMES = {
     mode: f"CorePulse - {label}" for mode, label in WINDOWS_MODE_LABELS.items()
 }
 
+# Identidades distintas; los nombres previos se reconocen sólo como aliases.
+COREPULSE_PROFILE_NAMES = {
+    **COREPULSE_FALLBACK_NAMES,
+    'HIGH_PERFORMANCE': 'CorePulse Game',
+    'MAXIMUM_PERFORMANCE': 'CorePulse Turbo Performance',
+}
+COREPULSE_PROFILE_ALIASES = {
+    mode: {COREPULSE_FALLBACK_NAMES[mode].casefold(), name.casefold()}
+    for mode, name in COREPULSE_PROFILE_NAMES.items()
+}
+
 GUID_RE = re.compile(r'(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b')
 HEX_RE = re.compile(r'(?i)0x([0-9a-f]+)')
 PAREN_NAME_RE = re.compile(r'\(([^()]*)\)')
 
 
 class PowerManager:
-    def __init__(self, runner=run_hidden):
+    def __init__(self, runner=run_hidden, *, registry_path=None, description_reader=None, scheme_restorer=None):
         self.runner = runner
+        self.scheme_restorer = scheme_restorer or (self._restore_default_native if runner is run_hidden else None)
+        from .managed_power_plans import ManagedPowerPlans
+        self.managed_plans = ManagedPowerPlans(self, registry_path, description_reader=description_reader)
 
     def _run(self, args, timeout=12) -> CommandResult:
         return self.runner(args, timeout=timeout, category='POWER')
@@ -107,10 +120,14 @@ class PowerManager:
         rows = schemes or {}
         row = rows.get(token) or {}
         name = str(row.get('name') or '').strip().casefold()
-        if name:
-            for mode, custom_name in COREPULSE_FALLBACK_NAMES.items():
-                if name == custom_name.casefold():
+        try:
+            record = self.managed_plans.read()['plans'].get(token, {})
+            mode = record.get('mode')
+            if mode in WINDOWS_MODE_SCHEMES and record.get('base') == WINDOWS_MODE_SCHEMES[mode]:
+                if self.managed_plans.owned_record(record) or name in COREPULSE_PROFILE_ALIASES[mode]:
                     return mode
+        except Exception:
+            logger.exception('No se pudo identificar el plan registrado %s', token)
         return None
 
     def active_windows_plan(self) -> Dict[str, Any]:
@@ -131,73 +148,54 @@ class PowerManager:
             'list_success': bool(listed.get('success')),
         }
 
-    def _duplicate_scheme(self, template_guid: str, display_name: str) -> Dict[str, Any]:
-        result = self._run(['powercfg', '/duplicatescheme', str(template_guid)])
-        if not result.ok:
-            return {'success': False, 'message': friendly_failure(result, f'crear el plan {display_name}'), 'result': result}
-        match = GUID_RE.search(result.stdout or '')
-        if not match:
-            return {'success': False, 'message': f'Windows creó el plan {display_name}, pero no devolvió un GUID verificable.'}
-        guid = match.group(0).lower()
-        renamed = self._run(['powercfg', '/changename', guid, display_name])
-        if not renamed.ok:
-            logger.warning('[POWER] El plan %s fue creado (%s) pero no pudo renombrarse', display_name, guid)
-        return {'success': True, 'guid': guid, 'created': True, 'name': display_name, 'renamed': bool(renamed.ok)}
+    @staticmethod
+    def _restore_default_native(guid):
+        import ctypes as c
+        import uuid
+        dll = c.WinDLL('powrprof')
+        token = c.create_string_buffer(uuid.UUID(guid).bytes_le, 16)
+        for name in ('PowerCanRestoreIndividualDefaultPowerScheme', 'PowerRestoreIndividualDefaultPowerScheme'):
+            fn = getattr(dll, name)
+            fn.argtypes = [c.c_void_p]
+            fn.restype = c.c_uint32
+            code = fn(token)
+            if code:
+                return {'success': False, 'message': f'Windows no pudo recuperar Equilibrado: {c.FormatError(code).strip()} (código {code}).'}
+        return {'success': True}
 
-    def ensure_mode_scheme(self, mode: str) -> Dict[str, Any]:
-        mode = str(mode or '').upper().strip()
-        template_guid = WINDOWS_MODE_SCHEMES.get(mode)
-        if not template_guid:
-            return {'success': False, 'message': f'Modo de energía no soportado: {mode}'}
-
+    def restore_missing_balanced(self):
+        # Revalidar justo antes: nunca restablecer un plan ya instalado.
         listed = self.list_schemes()
         if not listed.get('success'):
             return listed
-        schemes = listed.get('schemes') or {}
+        if BALANCED_GUID not in listed['schemes']:
+            if self.scheme_restorer is None:
+                return {'success': False, 'message': 'Equilibrado no está instalado y no hay proveedor de recuperación disponible.'}
+            try:
+                restored = self.scheme_restorer(BALANCED_GUID)
+            except Exception as exc:
+                logger.exception('No se pudo recuperar únicamente Equilibrado')
+                return {'success': False, 'message': f'Error recuperando Equilibrado: {exc}'}
+            if not restored.get('success'):
+                return restored
+            listed = self.list_schemes()
+        if not listed.get('success') or BALANCED_GUID not in listed.get('schemes', {}):
+            return {'success': False, 'message': 'Windows no confirmó la recuperación de Equilibrado.'}
+        return {'success': True, 'guid': BALANCED_GUID, 'mode': 'BALANCED',
+                'name': listed['schemes'][BALANCED_GUID]['name'], 'created': False, 'builtin': True}
 
-        # Preferir siempre el plan estándar de Windows si existe.
-        if template_guid in schemes:
-            row = schemes[template_guid]
-            return {
-                'success': True,
-                'mode': mode,
-                'guid': template_guid,
-                'name': row.get('name') or WINDOWS_MODE_LABELS[mode],
-                'created': False,
-                'builtin': True,
-            }
+    def ensure_mode_scheme(self, mode: str, *, protected_guids=()) -> Dict[str, Any]:
+        return self.managed_plans.ensure(mode, protected_guids=protected_guids)
 
-        # Reutilizar una copia CorePulse creada anteriormente para evitar duplicados.
-        expected_name = COREPULSE_FALLBACK_NAMES[mode].casefold()
-        for guid, row in schemes.items():
-            if str(row.get('name') or '').strip().casefold() == expected_name:
-                return {
-                    'success': True,
-                    'mode': mode,
-                    'guid': guid,
-                    'name': row.get('name') or COREPULSE_FALLBACK_NAMES[mode],
-                    'created': False,
-                    'builtin': False,
-                    'corepulse_copy': True,
-                }
+    def ensure_owned_profile(self, profile, *, protected_guids=()):
+        mode = {'GAME': 'HIGH_PERFORMANCE', 'TURBO': 'MAXIMUM_PERFORMANCE',
+                'COREPULSE GAME': 'HIGH_PERFORMANCE',
+                'COREPULSE TURBO PERFORMANCE': 'MAXIMUM_PERFORMANCE'}.get(str(profile).upper(), str(profile).upper())
+        return self.managed_plans.ensure(mode, protected_guids=protected_guids, require_owned=True)
 
-        # Si el plan no está instalado/visible, duplicar la plantilla oficial.
-        created = self._duplicate_scheme(template_guid, COREPULSE_FALLBACK_NAMES[mode])
-        if not created.get('success'):
-            created['message'] = (
-                f"Windows no tiene disponible el plan {WINDOWS_MODE_LABELS[mode]} y CorePulse no pudo crear una copia compatible. "
-                + str(created.get('message') or '')
-            ).strip()
-            return created
-        return {
-            'success': True,
-            'mode': mode,
-            'guid': created['guid'],
-            'name': created.get('name') or COREPULSE_FALLBACK_NAMES[mode],
-            'created': True,
-            'builtin': False,
-            'corepulse_copy': True,
-        }
+    def reconcile_owned_profiles(self, *, protected_guids=()):
+        # Operación explícita: no se llama desde telemetría ni navegación.
+        return self.managed_plans.reconcile(protected_guids=protected_guids)
 
     @staticmethod
     def _parse_ac_dc(output: str) -> Optional[Dict[str, int]]:
@@ -242,21 +240,24 @@ class PowerManager:
     def snapshot_scheme(self, guid: str) -> Dict[str, Any]:
         settings: Dict[str, Any] = {}
         unavailable: Dict[str, str] = {}
-        for name, setting in (
-            ('max_processor_state', MAX_PROCESSOR_STATE),
-            ('boost_mode', BOOST_MODE),
-            ('energy_performance_preference', PERF_EPP),
-        ):
-            row = self.query_setting(guid, setting)
-            if row.get('success'):
-                settings[name] = {
-                    'setting_guid': setting,
-                    'ac': int(row['ac']),
-                    'dc': int(row['dc']),
-                    'query_mode': row.get('query_mode'),
-                }
-            else:
-                unavailable[name] = row.get('message') or 'No disponible'
+        keys = (('max_processor_state', MAX_PROCESSOR_STATE), ('boost_mode', BOOST_MODE),
+                ('energy_performance_preference', PERF_EPP))
+        for verb in ('/qh', '/query'):
+            result = self._run(['powercfg', verb, str(guid), PROCESSOR_SUBGROUP])
+            if not result.ok:
+                continue
+            for name, setting in keys:
+                if name in settings:
+                    continue
+                block = self._setting_block(result.stdout, setting)
+                parsed = self._parse_ac_dc(block) if block is not None else None
+                if parsed is not None:
+                    settings[name] = {'setting_guid': setting, **parsed, 'query_mode': verb}
+            if len(settings) == len(keys):
+                break
+        for name, setting in keys:
+            if name not in settings:
+                unavailable[name] = 'Windows no expuso valores AC/DC interpretables.'
         capabilities = {
             'max_processor_state': 'max_processor_state' in settings,
             'boost_mode': 'boost_mode' in settings,
@@ -331,10 +332,30 @@ class PowerManager:
             }
         return {'success': True, 'guid': target, 'verified': True}
 
-    def delete_scheme(self, scheme: str) -> Dict[str, Any]:
+    def delete_scheme(self, scheme: str, *, creation_record=None) -> Dict[str, Any]:
         guid = str(scheme or '').lower().strip()
         if not GUID_RE.fullmatch(guid):
             return {'success': False, 'message': 'GUID de plan inválido; no se eliminó nada.'}
+        if guid in WINDOWS_MODE_SCHEMES.values():
+            return {'success': False, 'message': 'No se eliminan planes estándar de Windows.'}
+        listed = self.list_schemes()
+        if not listed.get('success'):
+            return listed
+        if guid not in listed['schemes']:
+            return {'success': True, 'guid': guid, 'already_absent': True}
+        row = listed['schemes'][guid]
+        if not self.managed_plans.owns(guid):
+            # Un backup transaccional antiguo es evidencia de creación; el nombre solo no.
+            mode = (creation_record or {}).get('mode')
+            if not (mode in COREPULSE_FALLBACK_NAMES and
+                    row.get('name') == COREPULSE_FALLBACK_NAMES[mode] and
+                    (creation_record or {}).get('name') == row.get('name')):
+                return {'success': False, 'message': 'Procedencia CorePulse no demostrada; plan conservado.'}
+        active = self.active_scheme()
+        if not active.get('success'):
+            return active
+        if active.get('guid') == guid:
+            return {'success': False, 'message': 'No se elimina el plan activo.'}
         r = self._run(['powercfg', '/delete', guid])
         if not r.ok:
             return {'success': False, 'message': friendly_failure(r, 'eliminar el plan temporal de CorePulse'), 'result': r}
@@ -456,7 +477,7 @@ class PowerManager:
             guid = str(guid).lower()
             if guid == original_scheme:
                 continue
-            deleted = self.delete_scheme(guid)
+            deleted = self.delete_scheme(guid, creation_record=row)
             if not deleted.get('success'):
                 cleanup_errors.append(deleted.get('message') or guid)
 

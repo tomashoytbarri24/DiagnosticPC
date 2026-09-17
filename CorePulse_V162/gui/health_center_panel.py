@@ -304,7 +304,7 @@ class HealthCenterPanel:
             self._tab = 'performance'
         else:
             requested_tab = str(initial_tab or 'summary').strip().lower()
-            self._tab = requested_tab if requested_tab in {'summary', 'battery', 'windows', 'repair', 'history', 'recovery', 'corepulse'} else 'summary'
+            self._tab = requested_tab if requested_tab in {'summary', 'battery', 'windows', 'repair', 'history', 'recovery', 'corepulse', 'audio'} else 'summary'
         self._initial_windows_section = str(initial_windows_section or 'summary').strip().lower()
         self._jobs=set()
         self._battery=None; self._startup=None; self._services=None; self._crashes=None; self._drivers=None; self._hw=None; self._restore=None
@@ -492,6 +492,14 @@ class HealthCenterPanel:
                 'title': 'Centro de salud',
                 'subtitle': 'Mantenimiento, estabilidad y recuperación en un solo lugar.',
             },
+            'audio': {
+                'button_text': 'Volver a Centro de salud',
+                'button_width': 186,
+                'button_command': lambda: self._select_tab('summary'),
+                'eyebrow': 'Verificación manual',
+                'title': 'Test de Audio',
+                'subtitle': 'Salida, canales y micrófono · grabación local sólo al pulsar Grabar.',
+            },
             'battery': {
                 'button_text': 'Volver a Centro de salud',
                 'button_width': 186,
@@ -609,7 +617,7 @@ class HealthCenterPanel:
         """
         if self._performance_only:
             return False
-        valid_tabs = {'summary', 'battery', 'windows', 'repair', 'history', 'recovery', 'corepulse'}
+        valid_tabs = {'summary', 'battery', 'windows', 'repair', 'history', 'recovery', 'corepulse', 'audio'}
         target = str(key or 'summary').strip().lower()
         if target not in valid_tabs:
             target = 'summary'
@@ -954,6 +962,11 @@ class HealthCenterPanel:
                 'bg': theme_color('#271733'), 'border': theme_color('#5c3d7d'),
                 'tags': ('Throttling', 'Benchmark', 'Perfiles')
             },
+            'Test de Audio': {
+                'icon': '🎧', 'category': 'Sonido y micrófono', 'accent': CYAN,
+                'bg': theme_color('#11283a'), 'border': theme_color('#2f6084'),
+                'tags': ('Canales', 'Micrófono', 'Grabación')
+            },
             'CorePulse': {
                 'icon': '◆', 'category': 'Capacidades reales', 'accent': GREEN,
                 'bg': theme_color('#13271f'), 'border': theme_color('#245d43'),
@@ -1024,7 +1037,7 @@ class HealthCenterPanel:
 
     def _request_render(self, delay=0):
         """Agrupa renders dinámicos y espera al scroll si está en movimiento."""
-        if not self._alive:
+        if not self._alive or self._tab == 'audio':
             return
         if self._rendering:
             self._render_pending = True
@@ -1103,6 +1116,7 @@ class HealthCenterPanel:
             self._clear()
             renderer = {
                 'summary': self._render_summary,
+                'audio': self._render_audio,
                 'battery': self._render_battery,
                 'performance': self._render_performance,
                 'windows': self._render_windows,
@@ -1138,6 +1152,11 @@ class HealthCenterPanel:
             crashes=self._crashes if isinstance(self._crashes, dict) else None,
             active_alerts=alerts,
         )
+
+    def _render_audio(self):
+        from gui.audio_test_panel import AudioTestPanel
+        self._audio_panel = AudioTestPanel(self.body)
+        self._audio_panel.pack(fill='x', padx=8, pady=8)
 
     def _render_health_intelligence_card(self):
         """Resumen general compacto y explicable.
@@ -1309,6 +1328,11 @@ class HealthCenterPanel:
                 _state_label(throttle_state), throttle_color,
                 lambda: getattr(self.app, 'open_gaming', lambda *_: None)('performance')
             ),
+        ))
+        from gui.audio_test_panel import open_audio_test
+        module_specs.append((
+            'Test de Audio', 'Canales izquierdo/derecho y micrófono con confirmación manual.',
+            'Prueba guiada · local', CYAN, lambda: open_audio_test(self.app)
         ))
         for index, spec in enumerate(module_specs):
             row_index, column_index = divmod(index, 3)
@@ -5007,6 +5031,7 @@ class HealthCenterPanel:
         # Registrar ANTES de pintar: la vista puede saber de inmediato que el
         # trabajo existe, incluso antes de que el worker ejecute el primer comando.
         self._jobs.add(name)
+        job_tab = self._tab
         if on_started is not None:
             try:
                 on_started()
@@ -5026,7 +5051,8 @@ class HealthCenterPanel:
                 on_done(result, error)
                 # Benchmark/juego/perfil no reconstruyen el Canvas en el mismo
                 # callback que termina el worker. Se agenda un render estable.
-                self._request_render(1)
+                if self._tab == job_tab and self._visible:
+                    self._request_render(1)
             try: self.app.after(0,done)
             except Exception: pass
         threading.Thread(target=worker,daemon=True,name='CorePulse-Health-'+name).start()
@@ -5227,6 +5253,11 @@ class HealthCenterPanel:
     def set_active(self, active):
         """Pausa el refresco periódico cuando la subvista Gaming está oculta."""
         self._visible = bool(active)
+        if not self._visible and self._tab == 'audio':
+            panel = getattr(self, '_audio_panel', None)
+            if panel is not None:
+                panel.service.cancel.set()
+                panel.service.clear_recording()
         if not self._visible and self._performance_after_id is not None:
             try: self.app.after_cancel(self._performance_after_id)
             except Exception: pass

@@ -432,7 +432,7 @@ class DiagnosticExperiencePanel(ctk.CTkFrame):
                 )
             self.priority_card.grid_configure(columnspan=columns)
             self.evidence_card.grid_configure(columnspan=columns)
-            for idx, key in enumerate(('cpu', 'gpu', 'ram', 'storage', 'battery', 'windows')):
+            for idx, key in enumerate(('cpu', 'gpu', 'ram', 'storage', 'battery', 'windows', 'audio')):
                 refs = self._component_cards.get(key)
                 if not refs:
                     continue
@@ -753,7 +753,7 @@ class DiagnosticExperiencePanel(ctk.CTkFrame):
         self._evidence_open_key = None
 
         self._component_cards = {}
-        for idx, key in enumerate(('cpu', 'gpu', 'ram', 'storage', 'battery', 'windows')):
+        for idx, key in enumerate(('cpu', 'gpu', 'ram', 'storage', 'battery', 'windows', 'audio')):
             row, col = divmod(idx, 2)
             row += 1
             card = ctk.CTkFrame(self.component_report, fg_color=SURFACE_3, border_width=1, border_color=theme_color('#172b43'), corner_radius=10)
@@ -941,6 +941,9 @@ class DiagnosticExperiencePanel(ctk.CTkFrame):
             pass
 
     def _component_action(self, key, result):
+        if key == 'audio':
+            from gui.audio_test_panel import open_audio_test
+            return lambda: open_audio_test(self.app)
         if key == 'cpu':
             fn = getattr(self.app, 'open_cpu_details', None)
             return fn if callable(fn) else None

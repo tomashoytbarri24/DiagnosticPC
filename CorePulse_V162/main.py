@@ -1178,7 +1178,7 @@ class App(ctk.CTk):
         self._prime_battery_presence_cache(getattr(self, '_device_identity_cache', None))
 
         target_tab = str(tab or 'summary').strip().lower()
-        if target_tab not in {'summary', 'battery', 'windows', 'repair', 'history', 'recovery', 'corepulse'}:
+        if target_tab not in {'summary', 'battery', 'windows', 'repair', 'history', 'recovery', 'corepulse', 'audio'}:
             target_tab = 'summary'
         target_section = str(windows_section or 'summary').strip().lower()
         if target_section not in {'summary', 'startup', 'services', 'crashes', 'drivers'}:

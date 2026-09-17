@@ -679,6 +679,8 @@ def run_complete_diagnostic(
             'history_is_informational_only': True,
         },
     }
+    from core.audio_test import recent_audio_result
+    result['audio_test'] = recent_audio_result()  # Sólo evidencia previa; nunca abre streams.
     result['diagnostic_mode'] = 'COMPLETE_4_0'
     result['complete_duration_seconds'] = round(float(result.get('duration_seconds') or 0.0) + float(result['complete_diagnostic']['duration_extension_s']), 3)
     _emit(progress_callback, 1.0, 'Diagnóstico completo', 'Resultado consolidado listo; reparaciones y PDF siguen siendo opcionales')

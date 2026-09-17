@@ -406,6 +406,18 @@ def build_component_assessments(result: Dict[str, Any]) -> List[Dict[str, Any]]:
          ('Inicio', startup_value, 'WARNING' if degraded else 'NORMAL' if startup_value == 'OK' else 'NO_EVALUABLE')],
         'Revisar Windows')
 
+    from core.audio_test import empty_result, evidence_rows, summary
+    audio = result.get('audio_test') or empty_result()
+    answers = audio.get('answers', {})
+    audio_status = summary(audio)
+    audio_state = 'WARNING' if audio_status == 'PROBLEMA REPORTADO' else 'NORMAL' if audio_status == 'AUDIO VERIFICADO' else 'NO_EVALUABLE'
+    add('audio', 'Audio', audio_state, audio_status,
+        'Confirmación humana de una prueba local reciente; el diagnóstico no reproduce ni graba audio.',
+        [f'{k}: {v}' for k, v in evidence_rows(audio) if k in ('Canal izquierdo', 'Canal derecho', 'Reproducción del micrófono')],
+        [(label, answers.get(key, 'NO EVALUADO'), 'NORMAL' if answers.get(key) == 'VERIFICADO' else 'WARNING' if answers.get(key) == 'PROBLEMA REPORTADO' else 'NO_EVALUABLE')
+         for label, key in (('Izquierdo', 'left'), ('Derecho', 'right'), ('Micrófono', 'microphone'))],
+        'Abrir Test de Audio')
+
     return reports
 
 
@@ -458,7 +470,12 @@ def build_component_evidence(result: Dict[str, Any], key: str) -> Dict[str, Any]
     load_title = 'Telemetría durante benchmark'
     sections: List[Dict[str, Any]] = []
 
-    if key == 'cpu':
+    if key == 'audio':
+        from core.audio_test import evidence_rows
+        sections.append(_section('Test de Audio · confirmación manual', evidence_rows(result.get('audio_test')),
+                                 note='Válido durante 24 horas y para los mismos dispositivos predeterminados. No certifica calidad ni salud de audio.'))
+
+    elif key == 'cpu':
         item = load_components.get('cpu') if isinstance(load_components.get('cpu'), dict) else {}
         tele = item.get('telemetry') if isinstance(item.get('telemetry'), dict) else {}
         bench = benchmark.get('cpu') if isinstance(benchmark.get('cpu'), dict) else {}

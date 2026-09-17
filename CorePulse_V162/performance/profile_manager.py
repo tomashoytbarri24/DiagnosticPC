@@ -76,11 +76,13 @@ class PerformanceProfileManager:
         # nunca se revierten al volver a abrir CorePulse.
         self._recover_stale_backup()
         initial_plan = self._refresh_windows_plan_state()
+        self._last_windows_plan_poll = time.monotonic()
         if initial_plan.get('success') and initial_plan.get('mode') in VISIBLE_MODES:
             detected_mode = str(initial_plan.get('mode')).upper()
             self.requested_mode = detected_mode
             self.effective_profile = detected_mode
             self.last_message = f'Plan activo de Windows detectado: {self.windows_plan_name}.'
+        self._status_cache = self._status_locked()
         self.thread = None
         if start_thread:
             self.thread = threading.Thread(target=self._loop, daemon=True, name='CorePulse-PerformanceProfiles')
@@ -306,8 +308,11 @@ class PerformanceProfileManager:
 
         target_info = None
         ensure_scheme = getattr(self.power, 'ensure_mode_scheme', None)
+        if isinstance(self.power, PowerManager) and profile in PERFORMANCE_MODES:
+            ensure_scheme = self.power.ensure_owned_profile
         if ensure_scheme is not None:
-            target_info = ensure_scheme(profile)
+            target_info = (ensure_scheme(profile, protected_guids={original_scheme})
+                           if isinstance(self.power, PowerManager) else ensure_scheme(profile))
             if not target_info.get('success'):
                 return target_info
             scheme = str(target_info.get('guid') or '').lower().strip()
@@ -322,9 +327,9 @@ class PerformanceProfileManager:
         if not scheme:
             return {'success': False, 'message': f'Windows no devolvió un GUID válido para el modo {profile}.'}
 
-        # Captura transaccional del plan DESTINO. Si fue creado por CorePulse se
-        # eliminará al restaurar; si ya existía, sus valores originales quedan
-        # guardados y se reponen antes de volver al plan inicial.
+        # Captura transaccional del destino. Las copias registradas se conservan
+        # para reutilizarlas, restaurando sus valores y el plan previo. Sólo los
+        # backends/respaldos antiguos conservan su limpieza temporal histórica.
         latest = load_backup(self.backup_path) or backup
         sync = latest.setdefault('windows_plan_sync', {})
         snapshots = sync.setdefault('scheme_snapshots', {})
@@ -339,7 +344,7 @@ class PerformanceProfileManager:
                 logger.exception('[POWER] Falló snapshot del plan destino %s', scheme)
                 target_snapshot = {'success': False, 'message': str(exc)}
 
-        if target_info.get('created'):
+        if target_info.get('created') and not target_info.get('managed_persistent'):
             created_schemes.setdefault(scheme, {
                 'mode': profile,
                 'name': target_info.get('name') or profile,
@@ -506,7 +511,12 @@ class PerformanceProfileManager:
 
     def poll_games_once(self) -> Dict[str, Any]:
         games = self.game_detector.detect_active_games()
-        windows_state = self._refresh_windows_plan_state()
+        # Detectar cambios externos sin ejecutar powercfg en cada sondeo de juegos.
+        windows_state = {}
+        now = time.monotonic()
+        if now - self._last_windows_plan_poll >= 30.0:
+            windows_state = self._refresh_windows_plan_state()
+            self._last_windows_plan_poll = now
         with self.lock:
             # Si el usuario cambió el plan desde Windows, CorePulse no lo fuerza
             # de vuelta. Adopta el modo real reconocido y actualiza su UI. Esto
@@ -606,6 +616,17 @@ class PerformanceProfileManager:
                 time.sleep(min(0.2, max(0.0, end - time.monotonic())))
 
     def status(self) -> Dict[str, Any]:
+        # El hilo Tk recibe el último estado mientras el worker aplica powercfg.
+        if not self.lock.acquire(blocking=False):
+            return copy.deepcopy(getattr(self, '_status_cache', {}))
+        try:
+            state = self._status_locked()
+            self._status_cache = state
+            return copy.deepcopy(state)
+        finally:
+            self.lock.release()
+
+    def _status_locked(self) -> Dict[str, Any]:
         with self.lock:
             return {
                 'requested_mode': self.requested_mode,
