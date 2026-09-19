@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "corepulse"
+dynamic = ["version"]
+requires-python = ">=3.12"
+description = "Hardware Monitoring & Diagnostics for Windows and Linux"
+
+[tool.setuptools.dynamic]
+version = {attr = "core.version.VERSION"}
+
+[tool.setuptools.packages.find]
+include = ["core*", "gui*", "database*", "performance*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config -ra -m 'not legacy_snapshot'"
+markers = [
+  "windows_real: requiere Windows real/hardware/servicios externos y se ejecuta sólo con --run-windows-real",
+  "legacy_snapshot: regresión histórica conservada; no forma parte del Quality Gate actual",
+]
+
+[tool.corepulse]
+python-policy = "3.12+"
+deep-sensors = "best-effort via pythonnet + HardwareMonitor"

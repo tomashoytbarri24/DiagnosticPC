@@ -1,0 +1,21 @@
+{
+  "version": "V169",
+  "quality_gate": "PASS",
+  "pytest": {
+    "passed": 171,
+    "skipped_environment": 15,
+    "legacy_snapshot_deselected": 180,
+    "subtests_passed": 11
+  },
+  "compile_targets": [
+    "main.py",
+    "bootstrap_corepulse.py",
+    "corepulse_launcher.py",
+    "core",
+    "gui",
+    "database",
+    "performance"
+  ],
+  "functional_scope": "sin cambios funcionales intencionales respecto de V168",
+  "windows_real_pending": true
+}

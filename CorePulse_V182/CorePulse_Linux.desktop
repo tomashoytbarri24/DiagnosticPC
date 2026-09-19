@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=CorePulse
+GenericName=Hardware Monitoring & Diagnostics
+Comment=Monitoreo, diagnóstico y mantenimiento de hardware
+Exec=sh -c 'F="$1"; F="${F#file://}"; ROOT="$(dirname "$F")"; exec "$ROOT/CorePulse_Linux_Launcher.sh"' _ %k
+Icon=utilities-system-monitor
+Terminal=false
+Categories=System;Utility;
+StartupNotify=true
+StartupWMClass=CorePulse
