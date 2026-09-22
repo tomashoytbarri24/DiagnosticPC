@@ -1,0 +1,76 @@
+name: CorePulse Stable Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detectar versión CorePulse publicada
+        id: version
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, re, subprocess
+          from pathlib import Path
+
+          sha = os.environ['GITHUB_SHA']
+          changed = subprocess.check_output(
+              ['git', 'diff-tree', '--no-commit-id', '--name-only', '-r', sha],
+              text=True,
+          ).splitlines()
+          roots = {line.replace('\\', '/').split('/', 1)[0] for line in changed if line.strip()}
+          rx = re.compile(r'(?i)^CorePulse_V(\d+)(?:_|$)')
+          candidates = []
+          for name in roots:
+              match = rx.match(name)
+              folder = Path(name)
+              if match and (folder / 'core' / 'version.py').is_file():
+                  candidates.append((int(match.group(1)), name))
+          if not candidates:
+              raise SystemExit('No se detectó una carpeta CorePulse_V### modificada en este push.')
+          version, folder = max(candidates)
+          version_text = (Path(folder) / 'core' / 'version.py').read_text(encoding='utf-8')
+          if f'VERSION = "{version}"' not in version_text:
+              raise SystemExit(f'La carpeta {folder} y core/version.py no coinciden.')
+          out = Path(os.environ['GITHUB_OUTPUT'])
+          with out.open('a', encoding='utf-8') as handle:
+              handle.write(f'folder={folder}\n')
+              handle.write(f'version={version}\n')
+          PY
+
+      - name: Empaquetar y calcular SHA-256
+        shell: bash
+        run: |
+          FOLDER='${{ steps.version.outputs.folder }}'
+          VERSION='${{ steps.version.outputs.version }}'
+          ZIP="CorePulse_V${VERSION}.zip"
+          zip -rq "$ZIP" "$FOLDER" -x '*/__pycache__/*' '*.pyc' '*.pyo' '*/.git/*' '*/.github/*'
+          sha256sum "$ZIP" > "$ZIP.sha256"
+
+      - name: Crear release estable
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          VERSION='${{ steps.version.outputs.version }}'
+          TAG="V${VERSION}"
+          ZIP="CorePulse_V${VERSION}.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "La release $TAG ya existe. Incrementa VERSION antes de volver a publicar." >&2
+            exit 1
+          fi
+          gh release create "$TAG" "$ZIP" "$ZIP.sha256" \
+            --target "$GITHUB_SHA" \
+            --title "CorePulse V${VERSION}" \
+            --notes "Release estable automática de CorePulse V${VERSION}."

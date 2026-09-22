@@ -1,0 +1,12 @@
+psutil
+platformdirs
+send2trash
+customtkinter
+Pillow
+matplotlib
+pystray>=0.19
+reportlab
+groq
+python-dotenv>=1.0
+wmi; platform_system=="Windows"
+pywin32; platform_system=="Windows"
