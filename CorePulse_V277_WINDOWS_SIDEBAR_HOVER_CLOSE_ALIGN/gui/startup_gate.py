@@ -163,7 +163,7 @@ def _center_native_window_on_active_monitor(window):
 
 
 class StartupGate:
-    """Gate visual mínimo: logo, progreso real y porcentaje."""
+    """Gate visual mínimo: logo y barra de progreso real sin porcentaje visible."""
 
     WIDTH = 560
     HEIGHT = 250
@@ -197,12 +197,12 @@ class StartupGate:
             fg_color=CARD,
             border_width=1,
             border_color=BORDER,
-            corner_radius=24,
+            corner_radius=0,
         )
         shell.pack(fill='both', expand=True, padx=10, pady=10)
 
         content = ctk.CTkFrame(shell, fg_color='transparent')
-        content.pack(fill='both', expand=True, padx=42, pady=(28, 28))
+        content.pack(fill='both', expand=True, padx=28, pady=(28, 28))
 
         self.brand_image = None
         try:
@@ -220,35 +220,24 @@ class StartupGate:
 
         progress_row = ctk.CTkFrame(content, fg_color='transparent')
         progress_row.pack(fill='x')
-        progress_row.grid_columnconfigure(0, weight=1)
 
         self.progress = ctk.CTkProgressBar(
             progress_row,
-            height=10,
-            corner_radius=999,
+            height=6,
+            corner_radius=0,
             progress_color=BLUE,
             fg_color=PROGRESS_TRACK,
             border_width=0,
         )
-        self.progress.grid(row=0, column=0, sticky='ew', padx=(0, 14))
+        self.progress.pack(fill='x')
         self.progress.set(0.0)
-
-        self.percent = ctk.CTkLabel(
-            progress_row,
-            text='0%',
-            width=44,
-            anchor='e',
-            font=('Segoe UI', 11, 'bold'),
-            text_color=TEXT,
-        )
-        self.percent.grid(row=0, column=1, sticky='e')
 
         self.branding = ctk.CTkLabel(
             shell,
             text='by Cereon Technologies ©',
             anchor='w',
             font=('Segoe UI', 10),
-            text_color=MUTED,
+            text_color='#FFFFFF',
         )
         self.branding.place(relx=0.055, rely=0.91, anchor='w')
 
@@ -299,7 +288,6 @@ class StartupGate:
             value = max(self._progress, min(1.0, max(0.0, float(progress))))
             self._progress = value
             self.progress.set(value)
-            self.percent.configure(text=f'{int(round(value * 100.0))}%')
         except Exception:
             pass
 

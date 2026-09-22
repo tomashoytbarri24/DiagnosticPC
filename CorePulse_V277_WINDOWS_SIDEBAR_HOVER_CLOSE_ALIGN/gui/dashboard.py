@@ -17,6 +17,7 @@ from core.runtime_paths import resource_root
 
 import psutil
 import customtkinter as ctk
+import tkinter as tk
 from PIL import Image
 
 from core.version import VERSION_LABEL
@@ -128,6 +129,83 @@ def _bind_sidebar_glyph(widget, command):
     except Exception:
         pass
     return widget
+
+
+def _install_sidebar_hover_close(app):
+    """V277: la X aparece solo al hacer hover dentro del sidebar.
+
+    El control deja de ocupar un lugar fijo a la izquierda. Se posiciona arriba
+    a la derecha del sidebar únicamente mientras el puntero está dentro del panel.
+    """
+    root = getattr(app, 'sidebar', None)
+    action = getattr(app, '_sidebar_close_button', None)
+    host = getattr(app, '_sidebar_top_controls', None)
+    if root is None or action is None or host is None:
+        return
+
+    pending = {'after': None}
+
+    def show_action():
+        try:
+            if not action.winfo_manager():
+                action.place(relx=1.0, x=-2, y=1, anchor='ne')
+            action.lift()
+        except Exception:
+            pass
+
+    def hide_action():
+        try:
+            action.place_forget()
+        except Exception:
+            pass
+
+    def inside_root():
+        try:
+            x, y = root.winfo_pointerxy()
+            node = root.winfo_containing(x, y)
+            while node is not None:
+                if node is root:
+                    return True
+                node = getattr(node, 'master', None)
+        except Exception:
+            pass
+        return False
+
+    def enter(_event=None):
+        after_id = pending.get('after')
+        if after_id:
+            try:
+                root.after_cancel(after_id)
+            except Exception:
+                pass
+            pending['after'] = None
+        show_action()
+
+    def finalize_leave():
+        pending['after'] = None
+        if not inside_root():
+            hide_action()
+
+    def leave(_event=None):
+        try:
+            pending['after'] = root.after(18, finalize_leave)
+        except Exception:
+            finalize_leave()
+
+    def bind_node(node):
+        try:
+            node.bind('<Enter>', enter, add='+')
+            node.bind('<Leave>', leave, add='+')
+        except Exception:
+            pass
+        try:
+            for child in node.winfo_children():
+                bind_node(child)
+        except Exception:
+            pass
+
+    bind_node(root)
+    hide_action()
 
 
 def _sync_sidebar_visibility_controls(app):
@@ -366,6 +444,61 @@ def _section_label(parent, text):
         text_color=COLORS['muted'],
         anchor='w',
     )
+
+
+def _sidebar_divider(parent):
+    # V272: los divisores dejan de competir con el acento principal. Usan el
+    # mismo borde estructural que tarjetas y gráficos para una separación más
+    # sobria, coherente y compatible con todos los temas.
+    return tk.Frame(
+        parent,
+        bg=COLORS['border'],
+        height=1,
+        bd=0,
+        highlightthickness=0,
+    )
+
+
+def _ensure_sidebar_native_border(app):
+    """V274: borde exterior completo, incluido el cierre inferior real.
+
+    V273 corrigió el inset general del rectángulo, pero el borde inferior aún
+    podía percibirse desalineado porque se colocaba con un desplazamiento
+    negativo respecto del borde inferior del CTkFrame. En V274 todos los lados
+    se anclan con `anchor` a las esquinas/perímetros reales del sidebar,
+    evitando que la línea inferior se vea más adentro que el resto.
+    """
+    old = getattr(app, '_sidebar_native_border', None)
+    if old is not None:
+        for widget in old if isinstance(old, (tuple, list)) else (old,):
+            try:
+                widget.destroy()
+            except Exception:
+                pass
+
+    thickness = 2
+    border_color = COLORS['border']
+
+    top = tk.Frame(app.sidebar, bg=border_color, bd=0, highlightthickness=0)
+    bottom = tk.Frame(app.sidebar, bg=border_color, bd=0, highlightthickness=0)
+    left = tk.Frame(app.sidebar, bg=border_color, bd=0, highlightthickness=0)
+    right = tk.Frame(app.sidebar, bg=border_color, bd=0, highlightthickness=0)
+
+    # Borde exterior real: anclado a las esquinas/perímetros del panel.
+    top.place(x=0, y=0, anchor='nw', relwidth=1.0, height=thickness)
+    bottom.place(x=0, rely=1.0, anchor='sw', relwidth=1.0, height=thickness)
+    left.place(x=0, y=0, anchor='nw', relheight=1.0, width=thickness)
+    right.place(relx=1.0, y=0, anchor='ne', relheight=1.0, width=thickness)
+
+    lines = (top, bottom, left, right)
+    for line in lines:
+        try:
+            line.lift()
+        except Exception:
+            pass
+
+    app._sidebar_native_border = lines
+    return lines
 
 
 def _section_header(parent, title, subtitle):
@@ -1210,7 +1343,7 @@ def _build_system_band(app):
         accent=COLORS['amber'],
         eyebrow='Supervisión actual',
     )
-    alerts.grid(row=0, column=1, sticky='nsew', padx=5)
+    alerts.grid(row=0, column=1, sticky='nsew', padx=(0, 5))
     app._alert_value.configure(text='Sin alertas activas', text_color=COLORS['green'], justify='left', anchor='w', wraplength=185)
     app._alert_detail.configure(text='')
     app._alert_detail.pack_forget()
@@ -1280,7 +1413,7 @@ def _rebuild_sidebar(app):
 
     for attr in ('_btn_summary', '_theme_toggle_button', '_update_button', '_personalization_block',
                  '_personalization_label', '_personalization_hint', '_personalization_divider', '_sidebar_version',
-                 '_sidebar_top_controls', '_sidebar_menu_button', '_sidebar_close_button'):
+                 '_personalization_top_divider', '_sidebar_top_controls', '_sidebar_menu_button', '_sidebar_close_button', '_sidebar_hover_close_ready', '_sidebar_native_border'):
         try:
             setattr(app, attr, None)
         except Exception:
@@ -1291,7 +1424,8 @@ def _rebuild_sidebar(app):
         sidebar_width = int(app._sidebar_target_width())
     except Exception:
         sidebar_width = 232
-    _safe_config(app.sidebar, fg_color=COLORS['sidebar'], width=sidebar_width)
+    _safe_config(app.sidebar, fg_color=COLORS['sidebar'], width=sidebar_width, border_width=0, corner_radius=0)
+    _ensure_sidebar_native_border(app)
 
     _safe_pack_forget(app.frame_logo)
     _safe_pack_forget(getattr(app, 'lbl_logo_icon', None))
@@ -1316,9 +1450,10 @@ def _rebuild_sidebar(app):
             pass
     app._sidebar_toggle_button = None
 
-    # V254: control de cierre como glifo suelto, sin botón ni fondo.
-    top_controls = ctk.CTkFrame(app.sidebar, fg_color='transparent', height=30)
-    top_controls.pack(fill='x', padx=14, pady=(10, 4))
+    # V277: cabecera superior limpia. La X no queda fija a la izquierda;
+    # aparece arriba a la derecha únicamente al entrar con el mouse al sidebar.
+    top_controls = ctk.CTkFrame(app.sidebar, fg_color='transparent', height=26)
+    top_controls.pack(fill='x', padx=14, pady=(9, 5))
     top_controls.pack_propagate(False)
     app._sidebar_top_controls = top_controls
     app._sidebar_menu_button = None
@@ -1326,19 +1461,21 @@ def _rebuild_sidebar(app):
     close_button = ctk.CTkLabel(
         top_controls,
         text='✕',
-        width=30,
-        height=30,
+        width=24,
+        height=24,
         fg_color='transparent',
         text_color=COLORS['text_2'],
-        font=(FONT, 15, 'bold'),
+        font=(FONT, 14, 'bold'),
         anchor='center',
     )
     _bind_sidebar_glyph(close_button, getattr(app, 'toggle_sidebar_collapse', None))
-    close_button.pack(side='left')
     app._sidebar_close_button = close_button
+    app._sidebar_hover_close_ready = False
+
+    _sidebar_divider(app.sidebar).pack(fill='x', padx=14, pady=(0, 8))
 
     monitor = _section_label(app.sidebar, 'MONITOREO')
-    monitor.pack(fill='x', padx=17, pady=(8, 4))
+    monitor.pack(fill='x', padx=17, pady=(3, 3))
     _load_sidebar_icons(app)
 
     app._btn_summary = ctk.CTkButton(app.sidebar, text='Resumen', command=lambda: None)
@@ -1347,26 +1484,29 @@ def _rebuild_sidebar(app):
 
     _apply_sidebar_icon(app, 'btn_benchmark', collapsed=False)
     app.btn_benchmark.pack(fill='x', padx=10, pady=(1, 4))
+    _sidebar_divider(app.sidebar).pack(fill='x', padx=14, pady=(4, 5))
 
     diagnosis = _section_label(app.sidebar, 'DIAGNÓSTICO')
-    diagnosis.pack(fill='x', padx=17, pady=(12, 4))
+    diagnosis.pack(fill='x', padx=17, pady=(6, 3))
     _apply_sidebar_icon(app, 'btn_diagnostic', collapsed=False)
     app.btn_diagnostic.pack(fill='x', padx=10, pady=1)
     _apply_sidebar_icon(app, 'btn_health_center', collapsed=False)
     app.btn_health_center.pack(fill='x', padx=10, pady=1)
     _safe_pack_forget(app.btn_pdf)
+    _sidebar_divider(app.sidebar).pack(fill='x', padx=14, pady=(4, 5))
 
     maintenance = _section_label(app.sidebar, 'MANTENIMIENTO')
-    maintenance.pack(fill='x', padx=17, pady=(12, 4))
+    maintenance.pack(fill='x', padx=17, pady=(6, 3))
     _apply_sidebar_icon(app, 'btn_cleanup', collapsed=False)
     app.btn_cleanup.pack(fill='x', padx=10, pady=1)
     _apply_sidebar_icon(app, 'btn_tweaks', collapsed=False)
     app.btn_tweaks.pack(fill='x', padx=10, pady=1)
     _apply_sidebar_icon(app, 'btn_network', collapsed=False)
     app.btn_network.pack(fill='x', padx=10, pady=1)
+    _sidebar_divider(app.sidebar).pack(fill='x', padx=14, pady=(4, 5))
 
     history = _section_label(app.sidebar, 'HISTORIAL')
-    history.pack(fill='x', padx=17, pady=(12, 4))
+    history.pack(fill='x', padx=17, pady=(6, 3))
     _apply_sidebar_icon(app, 'btn_smart_alerts', collapsed=False)
     app.btn_smart_alerts.pack(fill='x', padx=10, pady=1)
     _apply_sidebar_icon(app, 'btn_session_trends', collapsed=False)
@@ -1382,9 +1522,13 @@ def _rebuild_sidebar(app):
     )
     app._personalization_block = personalization_block
 
+    personal_top_divider = _sidebar_divider(personalization_block)
+    personal_top_divider.pack(fill='x', padx=14, pady=(0, 7))
+    app._personalization_top_divider = personal_top_divider
+
     personalization = _section_label(personalization_block, 'PERSONALIZACIÓN')
     app._personalization_label = personalization
-    personalization.pack(fill='x', padx=17, pady=(7, 1))
+    personalization.pack(fill='x', padx=17, pady=(5, 1))
     # V256: se elimina el subtítulo visual "Apariencia y versión".
     # Se conserva el atributo por compatibilidad con el layout responsivo.
     app._personalization_hint = None
@@ -1433,9 +1577,12 @@ def _rebuild_sidebar(app):
         text_color=COLORS['muted'],
         anchor='w',
     )
-    app._sidebar_version.pack(fill='x', padx=17, pady=(3, 8))
-    personalization_block.pack(side='bottom', fill='x', padx=0, pady=(6, 10))
+    app._sidebar_version.pack(fill='x', padx=17, pady=(1, 2))
+    # V275: en la composición base el bloque fluye junto al resto del menú.
+    # Solo en alturas realmente ajustadas el layout responsivo lo reancla abajo.
+    personalization_block.pack(fill='x', padx=0, pady=(6, 2))
 
+    _install_sidebar_hover_close(app)
     _sync_sidebar_visibility_controls(app)
 
 

@@ -1,4 +1,6 @@
-# CorePulse V205 — Safe Boat Route + Continued Visual Polish
+# CorePulse
+
+> Versión actual del paquete: **V259**. V205 — Safe Boat Route + Continued Visual Polish
 
 V205 continúa la rama Windows desde V204. El benchmark GPU pasa a **V25** para corregir un problema real reportado: el **barco se metía en la isla**.
 

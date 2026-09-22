@@ -431,7 +431,7 @@ class App(ctk.CTk):
         self.chart_after_id = None
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
-        self.sidebar = ctk.CTkFrame(self, fg_color=BG_SIDEBAR, corner_radius=0, width=230)
+        self.sidebar = ctk.CTkFrame(self, fg_color=BG_SIDEBAR, corner_radius=0, width=230, border_width=1, border_color=BORDER_COLOR)
         self._sidebar_collapsed = False
         self._sidebar_animating = False
         self._sidebar_anim_after_id = None
@@ -446,7 +446,7 @@ class App(ctk.CTk):
         self._sidebar_edge_preview_y = None
         self._sidebar_global_click_bound = False
         self._sidebar_edge_hide_after_id = None
-        self.sidebar.grid(row=0, column=0, sticky='nsew')
+        self.sidebar.grid(row=0, column=0, sticky='nsew', padx=(12, 0), pady=(14, 14))
         self.sidebar.grid_propagate(False)
         self.frame_logo = ctk.CTkFrame(self.sidebar, fg_color='transparent')
         # 61w: no legacy pack; dashboard.py publica el sidebar una sola vez.
@@ -658,7 +658,7 @@ class App(ctk.CTk):
                 self.sidebar.grid_remove()
                 self.grid_columnconfigure(0, weight=0, minsize=0)
             else:
-                self.sidebar.grid(row=0, column=0, sticky='nsew')
+                self.sidebar.grid(row=0, column=0, sticky='nsew', padx=(12, 0), pady=(14, 14))
                 self.sidebar.configure(width=target_width)
                 self.grid_columnconfigure(0, weight=0, minsize=target_width)
         except Exception:

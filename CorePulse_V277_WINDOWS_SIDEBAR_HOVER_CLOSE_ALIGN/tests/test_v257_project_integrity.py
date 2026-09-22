@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_current_version_and_benchmark_identity():
     version = (ROOT / 'core' / 'version.py').read_text(encoding='utf-8')
     bench = (ROOT / 'core' / 'benchmark_version.py').read_text(encoding='utf-8')
-    assert 'VERSION = "257"' in version
+    assert 'VERSION = "277"' in version
     assert 'GPU_BENCHMARK_VERSION = 25' in bench
     assert 'REAL_OR_NA' in (ROOT / 'COREPULSE_CANONICAL_BASE.md').read_text(encoding='utf-8')
 

@@ -488,14 +488,24 @@ def _style_sidebar_mode(app, mode):
         viewport_h = int(app.winfo_height())
     except Exception:
         viewport_h = 900
-    # V133: una ventana puede seguir siendo 'standard' por ancho aunque tenga
-    # poco alto útil. Personalización usa entonces una variante verticalmente
-    # ajustada sin miniaturizar los botones de navegación.
-    personalization_tight = compact or viewport_h < 900
+    # V276: el umbral anterior (<940) seguía tratando ventanas normales como
+    # "ajustadas" y empujaba Personalización al fondo, dejando un hueco visual
+    # demasiado grande bajo Historial. Solo reservamos el footer abajo cuando
+    # la altura es realmente baja.
+    personalization_tight = compact or viewport_h < 760
     # V131: el lateral conserva una anchura mínima legible incluso en modo compacto.
     collapsed = False
     width = 242 if compact else 248 if standard else 254
-    _cfg(app.sidebar, width=width, fg_color=SIDEBAR)
+    _cfg(app.sidebar, width=width, fg_color=SIDEBAR, border_width=0, corner_radius=0)
+    try:
+        border = getattr(app, '_sidebar_native_border', None)
+        border_lines = border if isinstance(border, (tuple, list)) else ((border,) if border is not None else ())
+        for line in border_lines:
+            if line is not None and line.winfo_exists():
+                line.configure(bg=BORDER)
+                line.lift()
+    except Exception:
+        pass
 
     # El logotipo gráfico grande no vuelve al lateral; sólo queda la identidad
     # tipográfica compacta creada por dashboard.py.
@@ -529,15 +539,15 @@ def _style_sidebar_mode(app, mode):
             if name == 'MONITOREO':
                 # Al retirar el branding superior, conservamos el aire visual que
                 # antes aportaba ese bloque. No cambia el ancho ni la navegación.
-                top_gap = 8 if compact else 12 if standard else 14
+                top_gap = 4 if compact else 6 if standard else 8
                 if has_brand_block:
                     top_gap = 0
             else:
-                top_gap = 5 if compact else 8
-            label.pack_configure(padx=17 if compact else 17, pady=(top_gap, 3 if compact else 4))
+                top_gap = 3 if compact else 5
+            label.pack_configure(padx=17, pady=(top_gap, 2 if compact else 3))
         except Exception:
             pass
-        _cfg(label, height=16 if compact else 18, font=(FONT, 8 if compact else 9, 'bold'))
+        _cfg(label, height=15 if compact else 17, font=(FONT, 8 if compact else 9, 'bold'))
 
     context_button = {
         'dashboard': '_btn_summary',
@@ -562,7 +572,7 @@ def _style_sidebar_mode(app, mode):
         active = attr == active_attr
         _cfg(
             b,
-            height=40 if collapsed else 36 if compact else 38 if standard else 40,
+            height=40 if collapsed else 34 if compact else 36 if standard else 38,
             width=44 if collapsed else 0,
             font=(FONT, 10, 'bold'),
             corner_radius=11 if collapsed else 10,
@@ -581,7 +591,7 @@ def _style_sidebar_mode(app, mode):
             pass
         _sidebar_line(b, _sidebar_option_accent(attr), active=active)
         try:
-            b.pack_configure(fill='none' if collapsed else 'x', padx=10 if collapsed else 11 if compact else 12, pady=2, anchor='center' if collapsed else 'w')
+            b.pack_configure(fill='none' if collapsed else 'x', padx=10 if collapsed else 11 if compact else 12, pady=1, anchor='center' if collapsed else 'w')
         except Exception:
             pass
 
@@ -598,6 +608,12 @@ def _style_sidebar_mode(app, mode):
     # que Actualizaciones quede pegado/cortado contra el borde inferior.
     personal = getattr(app, '_personalization_block', None)
     _cfg(personal, fg_color='transparent', border_width=0, corner_radius=0)
+    try:
+        pdiv = getattr(app, '_personalization_top_divider', None)
+        if pdiv is not None and pdiv.winfo_exists():
+            pdiv.configure(bg=BORDER, height=1)
+    except Exception:
+        pass
     _cfg(getattr(app, '_personalization_label', None), height=16, font=(FONT, 8 if compact else 9, 'bold'), text_color=MUTED)
     _cfg(getattr(app, '_personalization_hint', None), height=13, font=(FONT, 8), text_color=MUTED)
     _cfg(getattr(app, '_personalization_divider', None), fg_color='transparent', height=0)
@@ -631,15 +647,15 @@ def _style_sidebar_mode(app, mode):
     _cfg(ver, text=f'{VERSION_LABEL} · Cereon Technologies', font=(FONT, 8), text_color=MUTED)
     try:
         if personalization_tight:
-            # Conserva acciones a tamaño normal y retira únicamente metadatos
-            # secundarios cuando el alto disponible es limitado, incluso si el
-            # ancho todavía clasifica la ventana como 'standard'.
+            # Prioridad: Temas + Actualizaciones siempre visibles. El subtítulo y
+            # divisor permanecen retirados; la versión se conserva si cabe en el
+            # footer compacto.
             if hint is not None:
                 hint.pack_forget()
             if divider is not None:
                 divider.pack_forget()
-            if ver is not None:
-                ver.pack_forget()
+            if ver is not None and not ver.winfo_manager():
+                ver.pack(fill='x', padx=17, pady=(1, 1))
         else:
             theme_button = getattr(app, '_theme_toggle_button', None)
             # V256: subtítulo de Personalización eliminado por diseño.
@@ -649,14 +665,27 @@ def _style_sidebar_mode(app, mode):
             if divider is not None and divider.winfo_manager():
                 divider.pack_forget()
             if ver is not None and not ver.winfo_manager():
-                ver.pack(fill='x', padx=17, pady=(3, 8))
+                ver.pack(fill='x', padx=17, pady=(1, 2))
         if personal is not None:
-            personal.pack_configure(
-                side='top',
-                fill='x',
-                padx=0,
-                pady=(8, 5) if personalization_tight else (10, 7),
-            )
+            # V275: en alturas normales Personalización no debe quedar
+            # flotando como un bloque separado del Historial. Solo en alturas
+            # ajustadas se reserva como footer para evitar cortes del contenido.
+            if personalization_tight:
+                personal.pack_configure(
+                    side='bottom',
+                    fill='x',
+                    padx=0,
+                    pady=(3, 2),
+                )
+                personal.lift()
+            else:
+                personal.pack_configure(
+                    side='top',
+                    fill='x',
+                    padx=0,
+                    pady=(6, 2),
+                    after=getattr(app, 'btn_alert_history', None),
+                )
     except Exception:
         pass
 
