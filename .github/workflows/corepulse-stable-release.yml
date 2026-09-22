@@ -1,11 +1,11 @@
 # Managed by CorePulse · release automation
 # CorePulse workflow schema: v2-long-folder
-name: CorePulse Development Release
+name: CorePulse Stable Release
 
 on:
   push:
     branches:
-      - '**/corepulse-dev'
+      - main
     paths:
       - 'CorePulse_V*/**'
   workflow_dispatch:
@@ -19,11 +19,11 @@ permissions:
   contents: write
 
 concurrency:
-  group: corepulse-development-release-${{ github.ref }}
-  cancel-in-progress: true
+  group: corepulse-stable-release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  package-development-release:
+  package-stable-release:
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout
@@ -157,7 +157,7 @@ jobs:
           print(f'Paquete: {target.name} · SHA-256 {digest}')
           PY
 
-      - name: Crear o actualizar prerelease de desarrollo
+      - name: Crear release estable
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -166,35 +166,26 @@ jobs:
           RELEASE_DIR: ${{ runner.temp }}/corepulse-release
         run: |
           set -euo pipefail
-          TAG="V${VERSION}-dev"
+          TAG="V${VERSION}"
           ZIP="${RELEASE_DIR}/CorePulse_V${VERSION}.zip"
           SHA="${ZIP}.sha256"
           NOTES="${RELEASE_DIR}/release-notes.md"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "La release estable ${TAG} ya existe. Incrementa VERSION antes de volver a publicar en main." >&2
+            exit 1
+          fi
           cat > "$NOTES" <<EOF
-          Prerelease automática de desarrollo de CorePulse V${VERSION}.
+          Release estable automática de CorePulse V${VERSION}.
 
           - Rama: ${GITHUB_REF_NAME}
           - Carpeta: ${ROOT}
           - Commit: ${GITHUB_SHA}
           - Generada automáticamente por GitHub Actions.
           - Incluye ZIP fuente y SHA-256 verificable.
-
-          Esta release alimenta el canal Desarrollo de CorePulse. No es una release estable.
           EOF
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$TAG" "$ZIP" "$SHA" --clobber --repo "$GITHUB_REPOSITORY"
-            gh release edit "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "CorePulse V${VERSION} Development" \
-              --prerelease \
-              --notes-file "$NOTES"
-          else
-            gh release create "$TAG" "$ZIP" "$SHA" \
-              --repo "$GITHUB_REPOSITORY" \
-              --target "$GITHUB_SHA" \
-              --title "CorePulse V${VERSION} Development" \
-              --prerelease \
-              --notes-file "$NOTES"
-          fi
-          echo "Development release lista: ${TAG}"
+          gh release create "$TAG" "$ZIP" "$SHA" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "CorePulse V${VERSION}" \
+            --notes-file "$NOTES"
+          echo "Release estable lista: ${TAG}"
