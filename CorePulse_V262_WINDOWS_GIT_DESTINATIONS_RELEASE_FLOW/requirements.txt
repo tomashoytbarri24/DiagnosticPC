@@ -1,0 +1,3 @@
+# Dependencias base de CorePulse (Python 3.12+).
+# Para sensores profundos usa también requirements-sensors.txt o el instalador BAT.
+-r requirements-base.txt
