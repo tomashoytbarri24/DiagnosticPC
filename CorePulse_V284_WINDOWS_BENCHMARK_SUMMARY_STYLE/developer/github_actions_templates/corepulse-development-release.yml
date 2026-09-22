@@ -1,0 +1,200 @@
+# Managed by CorePulse · release automation
+# CorePulse workflow schema: v2-long-folder
+name: CorePulse Development Release
+
+on:
+  push:
+    branches:
+      - '**/corepulse-dev'
+    paths:
+      - 'CorePulse_V*/**'
+  workflow_dispatch:
+    inputs:
+      folder:
+        description: 'Carpeta CorePulse a publicar (opcional; vacío = versión válida más alta)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: corepulse-development-release-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package-development-release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+
+      - name: Detectar la versión publicada
+        id: corepulse
+        shell: bash
+        env:
+          MANUAL_FOLDER: ${{ inputs.folder }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          from pathlib import Path
+
+          ROOT_RX = re.compile(r'(?i)^CorePulse_V(\d+)(?:_|$)')
+          VERSION_RX = re.compile(r'^VERSION\s*=\s*["\'](\d+)["\']', re.M)
+
+          def validate(name: str):
+              folder = Path(name)
+              match = ROOT_RX.match(folder.name)
+              version_file = folder / 'core' / 'version.py'
+              if not match or not folder.is_dir() or not version_file.is_file():
+                  return None
+              text = version_file.read_text(encoding='utf-8', errors='replace')
+              vm = VERSION_RX.search(text)
+              if not vm:
+                  raise SystemExit(f'{folder}: core/version.py no contiene VERSION numérico.')
+              folder_version = match.group(1)
+              internal_version = vm.group(1)
+              if folder_version != internal_version:
+                  raise SystemExit(
+                      f'Versión inconsistente: carpeta={folder_version}, core/version.py={internal_version} ({folder}).'
+                  )
+              return int(folder_version), folder.as_posix(), internal_version
+
+          manual = os.environ.get('MANUAL_FOLDER', '').strip()
+          candidates = []
+
+          if manual:
+              item = validate(manual)
+              if not item:
+                  raise SystemExit(f'La carpeta indicada no es una versión CorePulse válida: {manual}')
+              candidates = [item]
+          elif os.environ.get('GITHUB_EVENT_NAME') == 'push':
+              event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text(encoding='utf-8'))
+              before = str(event.get('before') or '').strip()
+              sha = str(event.get('after') or os.environ.get('GITHUB_SHA') or '').strip()
+              if before and set(before) != {'0'}:
+                  cmd = ['git', 'diff', '--name-only', before, sha]
+              else:
+                  cmd = ['git', 'diff-tree', '--root', '--no-commit-id', '--name-only', '-r', sha]
+              changed = subprocess.check_output(cmd, text=True).splitlines()
+              roots = sorted({line.replace('\\', '/').split('/', 1)[0] for line in changed if line.strip()})
+              for name in roots:
+                  item = validate(name)
+                  if item:
+                      candidates.append(item)
+              if len(candidates) > 1:
+                  names = ', '.join(item[1] for item in candidates)
+                  raise SystemExit(f'El push modifica más de una versión CorePulse ({names}). Publica una versión por commit.')
+          else:
+              for folder in Path('.').iterdir():
+                  if folder.is_dir():
+                      item = validate(folder.name)
+                      if item:
+                          candidates.append(item)
+              if candidates:
+                  top = max(item[0] for item in candidates)
+                  candidates = [item for item in candidates if item[0] == top]
+                  if len(candidates) > 1:
+                      names = ', '.join(item[1] for item in candidates)
+                      raise SystemExit(f'Hay varias carpetas para V{top}: {names}. Indica folder al ejecutar manualmente.')
+
+          if not candidates:
+              raise SystemExit('No se detectó una carpeta CorePulse_V### válida para este evento.')
+
+          version_num, folder, version = candidates[0]
+          output = Path(os.environ['GITHUB_OUTPUT'])
+          with output.open('a', encoding='utf-8') as handle:
+              handle.write(f'root={folder}\n')
+              handle.write(f'version={version}\n')
+          print(f'CorePulse detectado: {folder} · V{version}')
+          PY
+
+      - name: Empaquetar fuente y SHA-256
+        shell: bash
+        env:
+          ROOT: ${{ steps.corepulse.outputs.root }}
+          VERSION: ${{ steps.corepulse.outputs.version }}
+          RELEASE_DIR: ${{ runner.temp }}/corepulse-release
+        run: |
+          set -euo pipefail
+          mkdir -p "$RELEASE_DIR"
+          python - <<'PY'
+          import hashlib
+          import os
+          import zipfile
+          from pathlib import Path
+
+          root = Path(os.environ['ROOT'])
+          version = os.environ['VERSION']
+          release_dir = Path(os.environ['RELEASE_DIR'])
+          target = release_dir / f'CorePulse_V{version}.zip'
+          ignored_dirs = {'.git', '.github', '.venv', 'venv', '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache'}
+          ignored_suffixes = {'.pyc', '.pyo'}
+
+          with zipfile.ZipFile(target, 'w', compression=zipfile.ZIP_DEFLATED, compresslevel=6) as archive:
+              for path in sorted(root.rglob('*')):
+                  if not path.is_file():
+                      continue
+                  rel = path.relative_to(root)
+                  if any(part in ignored_dirs for part in rel.parts):
+                      continue
+                  if path.suffix.casefold() in ignored_suffixes or path.name.endswith('.log'):
+                      continue
+                  archive.write(path, Path(root.name) / rel)
+
+          digest = hashlib.sha256(target.read_bytes()).hexdigest()
+          (Path(str(target) + '.sha256')).write_text(f'{digest}  {target.name}\n', encoding='utf-8')
+          print(f'Paquete: {target.name} · SHA-256 {digest}')
+          PY
+
+      - name: Crear o actualizar prerelease de desarrollo
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.corepulse.outputs.version }}
+          ROOT: ${{ steps.corepulse.outputs.root }}
+          RELEASE_DIR: ${{ runner.temp }}/corepulse-release
+        run: |
+          set -euo pipefail
+          TAG="V${VERSION}-dev"
+          ZIP="${RELEASE_DIR}/CorePulse_V${VERSION}.zip"
+          SHA="${ZIP}.sha256"
+          NOTES="${RELEASE_DIR}/release-notes.md"
+          cat > "$NOTES" <<EOF
+          Prerelease automática de desarrollo de CorePulse V${VERSION}.
+
+          - Rama: ${GITHUB_REF_NAME}
+          - Carpeta: ${ROOT}
+          - Commit: ${GITHUB_SHA}
+          - Generada automáticamente por GitHub Actions.
+          - Incluye ZIP fuente y SHA-256 verificable.
+
+          Esta release alimenta el canal Desarrollo de CorePulse. No es una release estable.
+          EOF
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" "$SHA" --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "CorePulse V${VERSION} Development" \
+              --prerelease \
+              --notes-file "$NOTES"
+          else
+            gh release create "$TAG" "$ZIP" "$SHA" \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "CorePulse V${VERSION} Development" \
+              --prerelease \
+              --notes-file "$NOTES"
+          fi
+          echo "Development release lista: ${TAG}"
