@@ -1,0 +1,10 @@
+[project]
+name = "corepulse"
+version = "0.10.2.42"
+requires-python = ">=3.12"
+description = "Hardware Monitoring & Diagnostics for Windows"
+
+[tool.corepulse]
+platform = "Windows only"
+python-policy = "CPython 3.12+ x64; adaptive minor; full-stack validation required"
+deep-sensors = "best-effort via pythonnet + HardwareMonitor"
