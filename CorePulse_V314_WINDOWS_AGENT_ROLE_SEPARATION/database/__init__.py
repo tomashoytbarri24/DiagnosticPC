@@ -1,1 +1,0 @@
-"""Persistencia local de CorePulse."""
